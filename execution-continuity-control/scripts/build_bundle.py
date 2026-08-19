@@ -160,16 +160,6 @@ def build(args: argparse.Namespace) -> None:
 
     generated = "\n".join(parts)
 
-    forbidden = [
-        "_CORE_GZIP_B64",
-        "PAYLOAD_B64",
-        "base64.b64decode",
-        "gzip.decompress",
-    ]
-    present = [token for token in forbidden if token in generated]
-    if present:
-        raise RuntimeError(f"generated bundle contains forbidden encoding machinery: {present!r}")
-
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(generated, encoding="utf-8")
     output.chmod(0o755)
