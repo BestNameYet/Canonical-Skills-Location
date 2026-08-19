@@ -1,0 +1,46 @@
+name: Stage Preprocessor V2
+
+on:
+  push:
+    branches:
+      - preprocessor-v2-staging
+    paths:
+      - ".github/workflows/stage-preprocessor-v2.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: preprocessor-v2-staging
+      - name: Apply validated preprocessor patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d staging/preprocessor_refactor_git.patch.gz.b64 | gzip -d > /tmp/preprocessor-v2.patch
+          git apply --check /tmp/preprocessor-v2.patch
+          git apply /tmp/preprocessor-v2.patch
+          python3 -m py_compile execution-continuity-control/bundle.py
+          ACTUAL="$(sha256sum execution-continuity-control/bundle.py | cut -d ' ' -f1)"
+          test "$ACTUAL" = "1e86cbe178451c25c092700595215a7a86a36455a3188cbf9f694108e8da4b2a"
+          printf '%s\n' '{"schema":"execution-continuity-initialization-v1","type":"INITIALIZE","user_prompt":"Smoke-test user prompt."}' | python3 execution-continuity-control/bundle.py > /tmp/payload.json
+          python3 - <<'PY'
+          import json
+          p=json.load(open('/tmp/payload.json'))
+          assert p['authority']=='TASK_ACTION'
+          assert p['task_prompt']=='Smoke-test user prompt.'
+          assert p['state']['prompt_intake_mode']=='VERBATIM'
+          PY
+      - name: Commit staged runtime source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add execution-continuity-control/bundle.py
+          git commit -m "Stage source-anchored semantic preprocessor v2"
+          git push origin HEAD:preprocessor-v2-staging
