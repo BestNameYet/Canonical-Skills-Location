@@ -2,52 +2,29 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:execution-continuity-control:execution-record:1",
   "title": "Execution Continuity Project Record",
-  "description": "Normative structural contract for execution-record timestamped project snapshots.",
   "type": "object",
-  "required": [
-    "format_version",
-    "created_at",
-    "updated_at",
-    "snapshot",
-    "project",
-    "entry_count",
-    "entries"
-  ],
+  "required": ["format_version", "created_at", "updated_at", "snapshot", "project", "entries"],
   "properties": {
     "format_version": {"const": 1},
     "created_at": {"type": "string", "format": "date-time"},
     "updated_at": {"type": "string", "format": "date-time"},
     "snapshot": {"$ref": "#/$defs/snapshot"},
     "project": {"$ref": "#/$defs/project"},
-    "entry_count": {"type": "integer", "minimum": 0},
     "entries": {"type": "array", "items": {"$ref": "#/$defs/entry"}}
   },
   "additionalProperties": false,
   "$defs": {
-    "recordFilename": {
-      "type": "string",
-      "pattern": "^execution-record_[0-9]{8}T[0-9]{12}Z\\.json$"
-    },
-    "sha256": {
-      "type": "string",
-      "pattern": "^[0-9a-f]{64}$"
-    },
-    "nonemptyString": {
-      "type": "string",
-      "minLength": 1
-    },
+    "text": {"type": "string", "minLength": 1},
+    "recordFilename": {"type": "string", "pattern": "^execution-record_[0-9]{8}T[0-9]{12}Z\\.json$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "snapshot": {
       "type": "object",
       "required": ["timestamp", "filename", "predecessor_filename", "predecessor_sha256"],
       "properties": {
         "timestamp": {"type": "string", "pattern": "^[0-9]{8}T[0-9]{12}Z$"},
         "filename": {"$ref": "#/$defs/recordFilename"},
-        "predecessor_filename": {
-          "oneOf": [{"$ref": "#/$defs/recordFilename"}, {"type": "null"}]
-        },
-        "predecessor_sha256": {
-          "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
-        }
+        "predecessor_filename": {"oneOf": [{"$ref": "#/$defs/recordFilename"}, {"type": "null"}]},
+        "predecessor_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]}
       },
       "additionalProperties": false
     },
@@ -55,41 +32,23 @@
       "type": "object",
       "required": ["project_id", "project_title"],
       "properties": {
-        "project_id": {"$ref": "#/$defs/nonemptyString"},
-        "project_title": {"$ref": "#/$defs/nonemptyString"}
+        "project_id": {"$ref": "#/$defs/text"},
+        "project_title": {"$ref": "#/$defs/text"}
       },
       "additionalProperties": false
     },
     "entry": {
       "type": "object",
-      "required": [
-        "entry_id", "sequence", "recorded_at", "project_id", "project_title",
-        "chat_id", "chat_title", "source_record_filename", "source_record_sha256",
-        "occurred", "type", "purpose", "operated_on", "result", "state_change",
-        "status", "evidence"
-      ],
+      "required": ["entry_id", "sequence", "recorded_at", "chat_id", "chat_title", "event", "outcome", "evidence"],
       "properties": {
         "entry_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
         "sequence": {"type": "integer", "minimum": 1},
         "recorded_at": {"type": "string", "format": "date-time"},
-        "project_id": {"$ref": "#/$defs/nonemptyString"},
-        "project_title": {"$ref": "#/$defs/nonemptyString"},
-        "chat_id": {"$ref": "#/$defs/nonemptyString"},
-        "chat_title": {"$ref": "#/$defs/nonemptyString"},
-        "source_record_filename": {
-          "oneOf": [{"$ref": "#/$defs/recordFilename"}, {"type": "null"}]
-        },
-        "source_record_sha256": {
-          "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
-        },
-        "occurred": {"$ref": "#/$defs/nonemptyString"},
-        "type": {"$ref": "#/$defs/nonemptyString"},
-        "purpose": {"$ref": "#/$defs/nonemptyString"},
-        "operated_on": {"$ref": "#/$defs/nonemptyString"},
-        "result": {"$ref": "#/$defs/nonemptyString"},
-        "state_change": {"$ref": "#/$defs/nonemptyString"},
-        "status": {"$ref": "#/$defs/nonemptyString"},
-        "evidence": {"$ref": "#/$defs/nonemptyString"}
+        "chat_id": {"$ref": "#/$defs/text"},
+        "chat_title": {"$ref": "#/$defs/text"},
+        "event": {"$ref": "#/$defs/text"},
+        "outcome": {"$ref": "#/$defs/text"},
+        "evidence": {"$ref": "#/$defs/text"}
       },
       "additionalProperties": false
     }
