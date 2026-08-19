@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "execution-record.schema.json",
+  "title": "Execution Continuity Project Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "project",
+    "snapshot_created_at",
+    "predecessor",
+    "entries"
+  ],
+  "properties": {
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title"],
+      "properties": {
+        "id": {
+          "type": ["string", "null"]
+        },
+        "title": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "snapshot_created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "predecessor": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["filename", "sha256"],
+          "properties": {
+            "filename": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      ]
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/entry"
+      }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "recorded_at",
+        "scope",
+        "kind",
+        "summary",
+        "outcome",
+        "status",
+        "evidence"
+      ],
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "recorded_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "scope": {
+          "type": "string",
+          "enum": ["worker", "orchestrator"]
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "outcome": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "chat_id": {
+              "type": ["string", "null"]
+            },
+            "chat_title": {
+              "type": ["string", "null"]
+            }
+          }
+        },
+        "data": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}
