@@ -98,9 +98,11 @@ The canonical machine-readable contract is `execution-record.schema.json` from t
 
 The persistent record intentionally uses only three semantic event fields:
 
-1. `event` — what occurred, including the relevant action or target;
-2. `outcome` — the actual result or resulting state;
-3. `evidence` — observable support for that outcome.
+1. `event` — what newly occurred, including the relevant action or target;
+2. `outcome` — the new result or resulting state;
+3. `evidence` — new observable support for that outcome.
+
+Each entry is a **delta**, not a self-contained history. Do not repeat historical context, prior results, rationale, or state already present in earlier entries unless repetition is necessary to identify the new event or dependency. When prior history matters, refer to the earlier entry rather than rewriting it.
 
 IDs, timestamps, project/chat provenance, sequence, and predecessor linkage are metadata, not additional semantic categories.
 
@@ -159,7 +161,7 @@ Only outer Orchestrator `COMPLETE` permits actual turn termination.
 1. Resolve one canonical turn snapshot and load required files from it.
 2. Initialize the Orchestrator and Worker; expose the user prompt to the Worker.
 3. Let the Worker perform substantive work.
-4. After each material unit, the Orchestrator records it with the three-field recorder.
+4. After each material unit, the Orchestrator records it with the three-field delta recorder.
 5. Intercept every Worker stop attempt and run a Worker-scoped router cycle.
 6. On Worker `CONTINUE`, resume work. On Worker `COMPLETE`/`IMPASSE`, return lifecycle control to the Orchestrator.
 7. Complete remaining Orchestrator meta-work and record material meta-events.
