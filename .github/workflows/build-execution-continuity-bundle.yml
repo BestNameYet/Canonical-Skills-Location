@@ -43,15 +43,19 @@ jobs:
           set -euo pipefail
           test -s dist/bundle.py
           python3 -m py_compile dist/bundle.py
-          EXECUTION_CONTINUITY_RECORD_DIR="$RUNNER_TEMP/ecc-smoke-records" python3 dist/bundle.py </dev/null > dist/initial-payload.json
+          printf '%s\n' '{"schema":"execution-continuity-initialization-v1","type":"INITIALIZE","user_prompt":"Smoke-test user prompt."}' | python3 dist/bundle.py > dist/initial-payload.json
           python3 - <<'PY'
           import json
           from pathlib import Path
           payload = json.loads(Path('dist/initial-payload.json').read_text())
-          assert payload['schema'] == 'execution-continuity-payload-v3'
+          assert payload['schema'] == 'execution-continuity-payload-v4'
           assert payload['authority'] == 'TASK_ACTION'
+          assert payload['task_prompt'] == 'Smoke-test user prompt.'
           assert isinstance(payload['state'], dict)
-          assert payload['state']['control_version'] == 3
+          assert payload['state']['control_version'] == 4
+          assert payload['state']['original_user_prompt'] == 'Smoke-test user prompt.'
+          assert payload['state']['task_prompt'] == 'Smoke-test user prompt.'
+          assert payload['state']['prompt_intake_mode'] == 'VERBATIM'
           assert payload['command']
           assert payload['payload_sha256']
           PY
