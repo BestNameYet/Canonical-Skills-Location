@@ -54,20 +54,11 @@ A staging branch has no canonical authority until its revision is reachable from
 
 The Orchestrator is the highest-scope controller and is itself continuity-governed. It receives its role from its preprompt and treats the user's prompt as payload for a Worker.
 
-It does not independently solve, critique, reinterpret, or form task-domain opinions. It:
-
-- initializes and runs the Worker;
-- passes the user prompt to the Worker;
-- owns continuity-script invocation;
-- routes script questions and answers at the correct scope;
-- intercepts every Worker stop attempt; and
-- owns the actual user-facing turn boundary.
+It does not independently solve, critique, reinterpret, or form task-domain opinions. It initializes and runs the Worker, passes the user prompt to it, owns continuity-script invocation, routes script questions and answers at the correct scope, intercepts every Worker stop attempt, and owns the actual user-facing turn boundary.
 
 ### Worker
 
-The Worker receives the user's prompt as its operative task and performs the substantive reasoning, tool use, artifact work, validation, and remediation.
-
-The Worker never owns actual user-facing `END_TURN`.
+The Worker receives the user's prompt as its operative task and performs substantive reasoning, tool use, artifact work, validation, and remediation. The Worker never owns actual user-facing `END_TURN`.
 
 When continuity requires a script, the Worker yields invocation to the Orchestrator. For Worker-scoped script questions, the Orchestrator obtains the answer from Worker execution state rather than inventing a task-domain answer.
 
@@ -75,13 +66,13 @@ When continuity requires a script, the Worker yields invocation to the Orchestra
 
 For current-turn material work:
 
-`action completes → recorder invoke → eight-question action questionnaire completes → next action may begin`
+`material action completes → recorder invoke → action questioner → optional end-turn router → next material action`
 
 A material action is any completed action, event, failure, decision, tool use, artifact effect, or evaluation that matters to understanding execution. Prior-turn events are not reconstructed merely because a new turn begins.
 
-The recorder is invoked after every such action. The recorder does not receive or infer the reason for invocation. It records only that it was invoked, timestamps that invocation, and starts the action questioner.
+The recorder is invoked after every material action. The recorder does not receive or infer the reason for invocation. It records only that it was invoked, timestamps that invocation, appends that invocation to the project record, and starts the action questioner.
 
-Recorder or questionnaire failure does not authorize stopping or change a router directive. Preserve pending audit facts, continue as required where safe, and complete recording when the mechanism becomes available.
+Recorder, questioner, or router failure does not authorize stopping or change a router directive. Preserve pending audit facts, continue as required where safe, and complete recording when the mechanism becomes available.
 
 ## Project execution record
 
@@ -97,49 +88,51 @@ Each successor copies every predecessor action unchanged and in order, links to 
 
 The canonical machine-readable contract is `schemas/execution-record.schema.json` from the canonical turn snapshot.
 
-The record is one chronological `actions` stream. It has three action types:
+The record is one chronological `actions` stream with three action types:
 
-1. `recorder_invocation` — created by the recorder immediately when externally invoked; contains only the mechanically necessary invocation metadata and timestamp.
-2. `action_questionnaire` — emitted by the action questioner after all eight canonical questions are answered; contains the exact ordered question/answer pairs.
-3. `router_cycle` — emitted by the end-turn router when a router cycle reaches a directive; contains the exact ordered router question/answer pairs and the resulting directive.
+1. `recorder_invocation` — created by the recorder immediately when externally invoked; contains only mechanically necessary invocation metadata plus the recorder-generated timestamp.
+2. `action_questionnaire` — returned by the action questioner after the eight canonical questions are answered; contains the exact ordered question/answer pairs.
+3. `end_turn_result` — returned by the action questioner after an invoked end-turn router reaches a directive; contains the complete router-produced `router_cycle` data object nested unchanged inside the questioner wrapper.
 
-There is no parallel router-history collection and no blank router placeholder. A router-cycle action exists only after a router cycle actually occurs.
+There is no parallel router-history collection and no blank or prospective router placeholder. An `end_turn_result` exists only after a router cycle actually occurs.
 
 ## Runtime executables
 
 Canonical scripts are source; local executable copies are noncanonical Runnables.
 
-Whenever a canonical script is required during a turn, copy its content from the canonical turn snapshot into the execution environment as a fresh file whose name includes `_run_[timestamp]`, then execute the newest valid Runnable derived from that same canonical script and turn snapshot.
-
-A Runnable never acquires canonical authority.
+Whenever a canonical script is required during a turn, copy its content from the canonical turn snapshot into the execution environment as a fresh file whose name includes `_run_[timestamp]`, then execute the newest valid Runnable derived from that same canonical script and turn snapshot. A Runnable never acquires canonical authority.
 
 ## Recorder
 
 Canonical source: `scripts/action_event_recorder.py`
 
-The recorder is the sole writer of execution-record snapshots. It has two distinct entry paths:
+The recorder is the sole writer of execution-record snapshots. It has two entry paths:
 
-- `invoke` — used by the Orchestrator after a material action. The recorder appends one `recorder_invocation` action, timestamps it, and immediately invokes the action questioner.
-- `append` — used only for formatted action objects returned by canonical child scripts. It appends the supplied object and does not start another questionnaire.
+- `invoke` — used by the Orchestrator after a material action. The recorder appends one `recorder_invocation`, timestamps it, and immediately starts the action questioner.
+- `append` — used only for formatted action objects returned by the action questioner. It appends the supplied object and does not start another questionnaire.
 
-The recorder does not classify the action and does not ask the eight questions. It never attempts to determine whether an invocation represents end-of-turn behavior.
+The recorder does not classify the action, does not ask the eight questions, and never determines whether an invocation is an end-turn attempt.
 
 ## Action questioner
 
 Canonical source: `scripts/action_questioner.py`
 
-The action questioner asks exactly eight questions and preserves each exact question/answer pair in order.
+The action questioner owns the eight-question interview and preserves every exact question/answer pair in order.
 
-The second question is the routing discriminator:
+Its sole routing discriminator is:
 
 `AQ2: Is this action an end-of-turn attempt? Answer YES or NO.`
 
-Accepted answers are `YES`, `NO`, `Y`, or `N`; the stored canonical values are `YES` or `NO`. End-turn routing must depend only on this explicit binary answer, never on interpreting free-form prose from another question.
+Accepted answers are `YES`, `NO`, `Y`, or `N`; stored values are normalized to `YES` or `NO`. End-turn routing depends only on this explicit binary answer, never on semantic interpretation of a free-form action description.
 
-After AQ8, the questioner constructs one schema-conforming `action_questionnaire` object and sends it to the recorder. The recorder appends it to a new immutable snapshot.
+After AQ8, the questioner constructs one schema-conforming `action_questionnaire` object and returns it to the recorder. The recorder appends it to a new immutable snapshot.
 
-- AQ2 `NO` → the questionnaire completes without invoking the end-turn router.
-- AQ2 `YES` → after the questionnaire object has been appended, the questioner invokes `scripts/end_turn_router.py` using that new snapshot as the router cycle's predecessor.
+- AQ2 `NO` → the questioner completes without invoking the end-turn router.
+- AQ2 `YES` → after the questionnaire object has been appended, the questioner invokes `scripts/end_turn_router.py` and becomes the router's caller/proxy for the entire cycle.
+
+While the router is active, all router answers are supplied back through the action questioner. The questioner forwards them to the router and relays the router's next question or terminal directive.
+
+When the router reaches a directive, it returns its formatted `router_cycle` data object to the action questioner. The questioner wraps that object as one `end_turn_result` action and returns the wrapper to the recorder. Only the recorder writes the wrapper to the project record.
 
 ## Pre-END-TURN router
 
@@ -147,9 +140,14 @@ Canonical source: `scripts/end_turn_router.py`
 
 The router owns questionnaire traversal and classifies the current scope as `CONTINUE`, `COMPLETE`, or `IMPASSE`. The model supplies answers from observable state; it does not reconstruct or replace router branching in prose.
 
-When a cycle reaches any directive, the router constructs one schema-conforming `router_cycle` object containing every router question actually reached and its answer, in executed order, plus the directive and any directive-specific data. The router sends that object to the recorder, and the recorder appends it before the directive is acted upon.
+The router has no execution-record write authority and no recorder reference. It is invoked only by the action questioner. When a cycle reaches a directive, the router returns one formatted `router_cycle` data object to its caller containing:
 
-The stored router action is the audit source of truth for that cycle.
+- the cycle ID and scope;
+- every router question actually reached and its answer, in executed order;
+- the resulting directive; and
+- directive-specific instruction or impasse evidence where required.
+
+The action questioner wraps that returned object and sends the wrapper to the recorder before the directive is acted upon. The nested router object is the audit source of truth for the cycle.
 
 ### Worker scope
 
@@ -169,7 +167,7 @@ When the Orchestrator proposes actual termination, that proposed end is recorded
 - `IMPASSE` → record/process the state; actual `END_TURN` remains prohibited.
 - `COMPLETE` → actual user-facing `END_TURN` is authorized.
 
-Only outer Orchestrator `COMPLETE`, after its router-cycle object has been appended, permits actual turn termination.
+Only outer Orchestrator `COMPLETE`, after its `end_turn_result` wrapper has been appended, permits actual turn termination.
 
 ## Required execution cycle
 
@@ -178,12 +176,13 @@ Only outer Orchestrator `COMPLETE`, after its router-cycle object has been appen
 3. Let the Worker perform one substantive material action.
 4. Orchestrator invokes the recorder.
 5. Recorder appends `recorder_invocation`, timestamps it, and starts the action questioner.
-6. Orchestrator supplies the eight questionnaire answers from the correct execution scope.
-7. Questioner sends its formatted `action_questionnaire` object to the recorder; recorder appends it.
-8. If AQ2 is `NO`, continue to the next action.
-9. If AQ2 is `YES`, the questioner invokes the end-turn router.
-10. Orchestrator supplies router answers from the correct execution scope.
-11. When the router reaches a directive, it sends its formatted `router_cycle` object to the recorder; recorder appends it.
-12. Act on the recorded directive: Worker `CONTINUE` resumes Worker execution; Worker terminal states return lifecycle control to Orchestrator; outer `CONTINUE` resumes required work; only outer `COMPLETE` permits user-facing turn termination.
+6. Orchestrator supplies the eight action-questionnaire answers from the correct scope.
+7. Questioner returns its formatted `action_questionnaire` to the recorder; recorder appends it.
+8. If AQ2 is `NO`, continue to the next material action.
+9. If AQ2 is `YES`, the questioner invokes the end-turn router and remains the caller for the cycle.
+10. Orchestrator supplies router answers through the action questioner; the questioner forwards them to the router.
+11. At a directive, the router returns its formatted `router_cycle` object to the questioner.
+12. Questioner wraps that object as `end_turn_result` and returns the wrapper to the recorder; recorder appends it.
+13. Act on the recorded directive: Worker `CONTINUE` resumes Worker execution; Worker terminal states return lifecycle control to Orchestrator; outer `CONTINUE` resumes required work; only outer `COMPLETE` permits user-facing turn termination.
 
 Do not expose router internals or audit bookkeeping to the user unless doing so is useful to the requested task.

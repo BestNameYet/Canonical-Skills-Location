@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """Deterministic Pre-END-TURN continuation questionnaire router.
 
-The action questioner invokes this script only after AQ2 establishes that the
-tracked action is an end-of-turn attempt. The model answers one router question
-at a time. The script owns legal traversal and directive classification.
+This script is invoked only by ``action_questioner.py`` after AQ2 establishes
+that the tracked action is an end-of-turn attempt. It owns legal traversal and
+classification only. It never writes the execution record and never invokes
+the recorder.
 
-When a cycle reaches CONTINUE, COMPLETE, or IMPASSE, the router sends one
-formatted ``router_cycle`` data object to ``action_event_recorder.py``. The
-recorder appends that object to a new immutable execution-record snapshot.
+On CONTINUE, COMPLETE, or IMPASSE it returns one formatted ``router_cycle``
+data object to the action questioner. The action questioner is responsible for
+wrapping that object and returning it to the recorder.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import uuid
@@ -88,7 +88,6 @@ Q = {
 }
 
 ALT_NEXT={"A1":"A2","A2":"A3","A3":"A4","A4":"A5","A5":"A6","A6":"A7","A7":"A8","A8":"A9"}
-
 CONTINUE_INSTRUCTIONS={
 "Q1.2:NO":"Inspect the failure result, error, state, environment, or returned evidence. Do not infer a task-wide limitation from an unidentified cause.",
 "Q2.1:NO":"Test the claimed capability or availability boundary using available tools, state, files, sources, permissions, or direct inspection.",
@@ -141,152 +140,98 @@ CONTINUE_INSTRUCTIONS={
 }
 
 
-def now():
+def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00","Z")
 
 
-def write_json(path: Path, obj: Any):
+def write_json(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True,exist_ok=True)
     fd,tmp=tempfile.mkstemp(prefix=path.name+".",suffix=".tmp",dir=str(path.parent))
     try:
         with os.fdopen(fd,"w",encoding="utf-8") as f:
             json.dump(obj,f,indent=2,ensure_ascii=False)
             f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
+            f.flush(); os.fsync(f.fileno())
         os.replace(tmp,path)
     finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+        if os.path.exists(tmp): os.unlink(tmp)
 
 
-def validate_state(s):
-    if not isinstance(s,dict):
-        raise SystemExit("Router state must be a JSON object")
-    if not isinstance(s.get("cycle_id"),str) or not s["cycle_id"]:
-        raise SystemExit("Router state has invalid cycle_id")
-    if not isinstance(s.get("trace"),list):
-        raise SystemExit("Router state has invalid trace")
-    status=s.get("status")
-    if status not in {"QUESTION","CONTINUE","COMPLETE","IMPASSE"}:
+def load(path: Path) -> dict[str, Any]:
+    if not path.exists(): raise SystemExit(f"State file does not exist: {path}")
+    s=json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(s,dict) or not isinstance(s.get("cycle_id"),str) or not isinstance(s.get("trace"),list):
+        raise SystemExit("Router state is invalid")
+    if s.get("status") not in {"QUESTION","CONTINUE","COMPLETE","IMPASSE"}:
         raise SystemExit("Router state has invalid status")
-    if status=="QUESTION" and s.get("current") not in Q:
+    if s.get("status")=="QUESTION" and s.get("current") not in Q:
         raise SystemExit("Router state has invalid current question")
     return s
 
 
-def load(path):
-    if not path.exists():
-        raise SystemExit(f"State file does not exist: {path}")
-    return validate_state(json.loads(path.read_text(encoding="utf-8")))
-
-
-def norm(qid,raw):
+def norm(qid: str, raw: str) -> str:
     raw=raw.strip()
     if qid=="Q15.1":
         return "NONE" if raw.upper() in {"NONE","NO FACT","NO_OBSERVABLE_FACT"} else raw
-    k=raw.upper().strip()
+    key=raw.upper().strip()
     aliases={"Y":"YES","N":"NO","ONLY THIS PATH":"ONLY_THIS_PATH","THIS PATH":"ONLY_THIS_PATH","PATH ONLY":"ONLY_THIS_PATH","PREVENTS RESULT":"PREVENTS_RESULT","TASK WIDE":"PREVENTS_RESULT","TASK-WIDE":"PREVENTS_RESULT","UNSURE":"UNKNOWN","DON'T KNOW":"UNKNOWN","DONT KNOW":"UNKNOWN"}
-    return aliases.get(k,k)
+    return aliases.get(key,key)
 
 
-def compact(trace):
+def validate_answer(qid: str, answer: str) -> None:
+    allowed=Q[qid][1]
+    if allowed==["FREE_TEXT_OR_NONE"]:
+        if not answer.strip(): raise ValueError("Q15.1 requires a non-empty observable fact or NONE")
+    elif answer not in allowed:
+        raise ValueError(f"Invalid answer {answer!r}; allowed: {allowed}")
+
+
+def compact(trace: list[dict[str, Any]]) -> str:
     out=[]
-    for x in trace:
-        if x["kind"]=="answer":
-            a=x["answer"]
-            a="<OBSERVABLE_FACT>" if x["question_id"]=="Q15.1" and a!="NONE" else a
-            out.append(f"{x['question_id']}:{a}")
-        else:
-            out.append(f"{x['directive']}: {x.get('instruction','')}".rstrip(": "))
+    for item in trace:
+        if item["kind"]=="answer": out.append(f"{item['question_id']}:{item['answer']}")
+        else: out.append(f"{item['directive']}: {item.get('instruction','')}".rstrip(": "))
     return " → ".join(out)
 
 
-def payload_q(s):
-    qid=s["current"]
-    text,allowed=Q[qid]
-    return {"status":"QUESTION","state":s["state_path"],"cycle_id":s["cycle_id"],"question_id":qid,"question":text,"allowed_answers":allowed,"trace":s["trace"],"trace_compact":compact(s["trace"])}
+def question_payload(s: dict[str, Any]) -> dict[str, Any]:
+    qid=s["current"]; text,allowed=Q[qid]
+    return {"status":"QUESTION","state":s["state_path"],"cycle_id":s["cycle_id"],"question_id":qid,"question":text,"allowed_answers":allowed,"trace_compact":compact(s["trace"])}
 
 
-def goto(s,qid):
-    s["current"]=qid
-    s["status"]="QUESTION"
-    s["updated_at"]=now()
-    return payload_q(s)
+def goto(s: dict[str, Any], qid: str) -> dict[str, Any]:
+    s["current"]=qid; s["status"]="QUESTION"; s["updated_at"]=now()
+    return question_payload(s)
 
 
-def run_json(command: list[str]) -> dict[str, Any]:
-    completed=subprocess.run(command,capture_output=True,text=True)
-    stdout=completed.stdout.strip()
-    if not stdout:
-        raise RuntimeError(f"recorder produced no JSON; stderr={completed.stderr.strip()!r}")
-    try:
-        data=json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"recorder produced invalid JSON: {stdout!r}") from exc
-    if completed.returncode!=0:
-        raise RuntimeError(f"recorder failed: {data!r}")
+def router_data(s: dict[str, Any]) -> dict[str, Any]:
+    pairs=[]
+    for item in s["trace"]:
+        if item.get("kind")=="answer":
+            qid=item["question_id"]
+            pairs.append({"id":qid,"question":Q[qid][0],"answer":item["answer"]})
+    data={"cycle_id":s["cycle_id"],"scope":s["scope"],"pairs":pairs,"directive":s["directive"]}
+    if s.get("instruction"): data["instruction"]=s["instruction"]
+    if s["directive"]=="IMPASSE":
+        data["impasse_evidence"]=s.get("impasse_evidence") or "No additional impasse evidence was captured beyond the recorded router answers."
     return data
 
 
-def send_cycle_to_recorder(s):
-    pairs=[]
-    for item in s["trace"]:
-        if item.get("kind")!="answer":
-            continue
-        qid=item["question_id"]
-        pairs.append({"id":qid,"question":Q[qid][0],"answer":item["answer"]})
-    payload={
-        "action_type":"router_cycle",
-        "scope":s["scope"],
-        "pairs":pairs,
-        "directive":s["directive"],
-    }
-    if s["directive"]=="CONTINUE":
-        payload["instruction"]=s["instruction"]
-    if s["directive"]=="IMPASSE":
-        payload["impasse_evidence"]=s.get("impasse_evidence") or "No additional impasse evidence was captured beyond the recorded router answers."
-    if s.get("source"):
-        payload["source"]=s["source"]
-    payload_path=Path(s["state_path"]).with_suffix(".action.json")
-    write_json(payload_path,payload)
-    command=[
-        sys.executable,s["recorder"],"append",
-        "--output-dir",s["output_dir"],
-        "--record",s["record"],
-        "--record-name",s["record_name"],
-        "--record-id",s["record_id"],
-        "--action-file",str(payload_path),
-    ]
-    return run_json(command)
-
-
-def directive(s,d,instruction,evidence=None):
-    s["trace"].append({"kind":"directive","directive":d,"instruction":instruction})
-    s["status"]=d
-    s["directive"]=d
-    s["instruction"]=instruction
-    s["current"]=None
-    s["updated_at"]=now()
-    s["completed_at"]=now()
-    if evidence:
-        s["impasse_evidence"]=evidence
-    receipt=send_cycle_to_recorder(s)
-    s["record_receipt"]=receipt
-    s["record"]=receipt["record"]
-    s["record_name"]=receipt["record_filename"]
+def directive(s: dict[str, Any], value: str, instruction: str, evidence: str | None=None) -> dict[str, Any]:
+    s["trace"].append({"kind":"directive","directive":value,"instruction":instruction})
+    s["status"]=value; s["directive"]=value; s["instruction"]=instruction; s["current"]=None; s["updated_at"]=now(); s["completed_at"]=now()
+    if evidence: s["impasse_evidence"]=evidence
     write_json(Path(s["state_path"]),s)
-    return {"status":"DIRECTIVE","state":s["state_path"],"cycle_id":s["cycle_id"],"directive":d,"terminal":d in {"COMPLETE","IMPASSE"},"end_turn_permitted":d in {"COMPLETE","IMPASSE"},"instruction":instruction,"trace":s["trace"],"trace_compact":compact(s["trace"]),"record":receipt}
+    return {"status":"DIRECTIVE","state":s["state_path"],"cycle_id":s["cycle_id"],"directive":value,"instruction":instruction,"data_object":router_data(s)}
 
 
-def cont(s,key):
+def cont(s: dict[str, Any], key: str) -> dict[str, Any]:
     return directive(s,"CONTINUE",CONTINUE_INSTRUCTIONS[key])
 
 
-def transition(s,qid,a):
+def transition(s: dict[str, Any], qid: str, a: str) -> dict[str, Any]:
     key=f"{qid}:{a}"
-    if key in CONTINUE_INSTRUCTIONS:
-        return cont(s,key)
+    if key in CONTINUE_INSTRUCTIONS: return cont(s,key)
     routes={
       ("Q1","YES"):"Q1.1",("Q1","NO"):"Q2",("Q1.1","YES"):"Q1.2",("Q1.1","NO"):"A1",("Q1.2","YES"):"A1",
       ("Q2","YES"):"Q2.1",("Q2","NO"):"Q3",("Q2.1","YES"):"Q2.2",("Q2.2","ONLY_THIS_PATH"):"A1",("Q2.2","PREVENTS_RESULT"):"A1",
@@ -306,15 +251,10 @@ def transition(s,qid,a):
       ("I1","YES"):"I2",("I2","YES"):"I3",("I3","NO"):"A1",("I3","YES"):"I4",("I4","NO"):"I5",
       ("C1","NO"):"C2",("C2","NO"):"C3",("C3","NO"):"C4",
     }
-    if qid=="Q15.1" and a!="NONE":
-        s["observable_stopping_fact"]=a
-        return goto(s,"Q15.2")
-    if (qid,a) in routes:
-        return goto(s,routes[(qid,a)])
-    if qid in ALT_NEXT and a=="NO":
-        return goto(s,ALT_NEXT[qid])
-    if qid=="A9" and a=="NO":
-        return goto(s,"I1")
+    if qid=="Q15.1" and a!="NONE": s["observable_stopping_fact"]=a; return goto(s,"Q15.2")
+    if (qid,a) in routes: return goto(s,routes[(qid,a)])
+    if qid in ALT_NEXT and a=="NO": return goto(s,ALT_NEXT[qid])
+    if qid=="A9" and a=="NO": return goto(s,"I1")
     if qid=="I5" and a=="NO":
         return directive(s,"IMPASSE","A required dependency remains unsatisfied; applicable alternatives are exhausted; no independent requested work or other available gap-reducing action remains. Report the specific surviving blocker and completed useful work.",s.get("observable_stopping_fact"))
     if qid=="C4" and a=="YES":
@@ -322,112 +262,53 @@ def transition(s,qid,a):
     raise RuntimeError(f"Unhandled transition {qid} / {a}")
 
 
-def validate(qid,a):
-    allowed=Q[qid][1]
-    if allowed==["FREE_TEXT_OR_NONE"]:
-        if not a.strip():
-            raise ValueError("Q15.1 requires a non-empty observable fact or NONE")
-    elif a not in allowed:
-        raise ValueError(f"Invalid answer {a!r}; allowed: {allowed}")
-
-
-def cmd_start(args):
+def cmd_start(args: argparse.Namespace) -> int:
     p=Path(args.state)
     if p.exists() and not args.force:
-        s=load(p)
-        if s.get("status")=="QUESTION":
-            print(json.dumps({"error":"ACTIVE_CYCLE_EXISTS","cycle_id":s["cycle_id"],"current":s["current"]},indent=2))
+        prior=load(p)
+        if prior.get("status")=="QUESTION":
+            print(json.dumps({"error":"ACTIVE_CYCLE_EXISTS","cycle_id":prior["cycle_id"],"current":prior["current"]}))
             return 2
-    source={}
-    if args.chat_id is not None:
-        source["chat_id"]=args.chat_id
-    if args.chat_title is not None:
-        source["chat_title"]=args.chat_title
-    s={
-        "cycle_id":args.cycle_id or str(uuid.uuid4()),
-        "started_at":now(),
-        "updated_at":now(),
-        "status":"QUESTION",
-        "current":"Q1",
-        "trace":[],
-        "state_path":str(p),
-        "scope":args.scope,
-        "recorder":args.recorder,
-        "output_dir":args.output_dir,
-        "record":args.record,
-        "record_name":args.record_name,
-        "record_id":args.record_id,
-        "source":source,
-    }
-    write_json(p,s)
-    print(json.dumps(payload_q(s),indent=2,ensure_ascii=False))
-    return 0
+    s={"cycle_id":args.cycle_id or str(uuid.uuid4()),"started_at":now(),"updated_at":now(),"status":"QUESTION","current":"Q1","trace":[],"state_path":str(p),"scope":args.scope}
+    write_json(p,s); print(json.dumps(question_payload(s),ensure_ascii=False)); return 0
 
 
-def cmd_answer(args):
-    p=Path(args.state)
-    s=load(p)
+def cmd_answer(args: argparse.Namespace) -> int:
+    p=Path(args.state); s=load(p)
     if s.get("status")!="QUESTION" or not s.get("current"):
-        print(json.dumps({"error":"CYCLE_NOT_WAITING_FOR_ANSWER","status":s.get("status"),"directive":s.get("directive")},indent=2))
-        return 2
-    qid=s["current"]
-    a=norm(qid,args.answer)
-    try:
-        validate(qid,a)
-    except ValueError as e:
-        print(json.dumps({"error":"INVALID_ANSWER","question_id":qid,"question":Q[qid][0],"allowed_answers":Q[qid][1],"received":args.answer,"message":str(e)},indent=2,ensure_ascii=False))
-        return 2
+        print(json.dumps({"error":"CYCLE_NOT_WAITING_FOR_ANSWER","status":s.get("status"),"directive":s.get("directive")})); return 2
+    qid=s["current"]; a=norm(qid,args.answer)
+    try: validate_answer(qid,a)
+    except ValueError as exc:
+        print(json.dumps({"error":"INVALID_ANSWER","question_id":qid,"question":Q[qid][0],"allowed_answers":Q[qid][1],"received":args.answer,"message":str(exc)},ensure_ascii=False)); return 2
     s["trace"].append({"kind":"answer","question_id":qid,"answer":a})
     result=transition(s,qid,a)
-    if s.get("status")=="QUESTION":
-        write_json(p,s)
-    print(json.dumps(result,indent=2,ensure_ascii=False))
-    return 0
+    if s.get("status")=="QUESTION": write_json(p,s)
+    print(json.dumps(result,ensure_ascii=False)); return 0
 
 
-def cmd_show(args):
+def cmd_show(args: argparse.Namespace) -> int:
     s=load(Path(args.state))
-    if s.get("status")=="QUESTION":
-        out=payload_q(s)
-    else:
-        out={"status":"DIRECTIVE","state":s["state_path"],"cycle_id":s["cycle_id"],"directive":s.get("directive"),"end_turn_permitted":s.get("directive") in {"COMPLETE","IMPASSE"},"instruction":s.get("instruction"),"trace":s.get("trace",[]),"trace_compact":compact(s.get("trace",[])),"record":s.get("record_receipt")}
-    print(json.dumps(out,indent=2,ensure_ascii=False))
-    return 0
+    out=question_payload(s) if s.get("status")=="QUESTION" else {"status":"DIRECTIVE","state":s["state_path"],"cycle_id":s["cycle_id"],"directive":s["directive"],"instruction":s.get("instruction"),"data_object":router_data(s)}
+    print(json.dumps(out,ensure_ascii=False)); return 0
 
 
-def cmd_reset(args):
+def cmd_reset(args: argparse.Namespace) -> int:
     p=Path(args.state)
-    if p.exists():
-        p.unlink()
-    print(json.dumps({"status":"RESET","state":str(p)},indent=2))
-    return 0
+    if p.exists(): p.unlink()
+    print(json.dumps({"status":"RESET","state":str(p)})); return 0
 
 
-def main():
-    ap=argparse.ArgumentParser()
-    sub=ap.add_subparsers(dest="cmd",required=True)
-    p=sub.add_parser("start")
-    p.add_argument("--state",required=True)
-    p.add_argument("--scope",required=True,choices=["worker","orchestrator"])
-    p.add_argument("--recorder",required=True)
-    p.add_argument("--output-dir",required=True)
-    p.add_argument("--record",required=True)
-    p.add_argument("--record-name",required=True)
-    p.add_argument("--record-id",required=True)
-    p.add_argument("--chat-id")
-    p.add_argument("--chat-title")
-    p.add_argument("--cycle-id")
-    p.add_argument("--force",action="store_true")
-    p.set_defaults(fn=cmd_start)
+def main() -> int:
+    ap=argparse.ArgumentParser(); sub=ap.add_subparsers(dest="cmd",required=True)
+    p=sub.add_parser("start"); p.add_argument("--state",required=True); p.add_argument("--scope",required=True,choices=["worker","orchestrator"]); p.add_argument("--cycle-id"); p.add_argument("--force",action="store_true"); p.set_defaults(fn=cmd_start)
     p=sub.add_parser("answer"); p.add_argument("--state",required=True); p.add_argument("--answer",required=True); p.set_defaults(fn=cmd_answer)
     p=sub.add_parser("show"); p.add_argument("--state",required=True); p.set_defaults(fn=cmd_show)
     p=sub.add_parser("reset"); p.add_argument("--state",required=True); p.set_defaults(fn=cmd_reset)
-    a=ap.parse_args()
-    try:
-        return a.fn(a)
+    args=ap.parse_args()
+    try: return args.fn(args)
     except Exception as exc:
-        print(json.dumps({"status":"FAIL","code":type(exc).__name__,"detail":str(exc)},ensure_ascii=False))
-        return 2
+        print(json.dumps({"status":"FAIL","code":type(exc).__name__,"detail":str(exc)},ensure_ascii=False)); return 2
 
 
 if __name__=="__main__":

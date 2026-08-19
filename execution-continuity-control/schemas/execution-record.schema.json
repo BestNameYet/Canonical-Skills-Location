@@ -38,7 +38,7 @@
         "chat_title": {"type": ["string", "null"]}
       }
     },
-    "ordinary_pair": {
+    "pair": {
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "question", "answer"],
@@ -48,65 +48,37 @@
         "answer": {"$ref": "#/$defs/answer"}
       }
     },
-    "end_turn_pair": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "question", "answer"],
-      "properties": {
-        "id": {"const": "AQ2"},
-        "question": {"const": "Is this action an end-of-turn attempt? Answer YES or NO."},
-        "answer": {"type": "string", "enum": ["YES", "NO"]}
-      }
-    },
     "questionnaire_pairs": {
       "type": "array",
       "minItems": 8,
       "maxItems": 8,
       "items": false,
       "prefixItems": [
-        {
-          "allOf": [
-            {"$ref": "#/$defs/ordinary_pair"},
-            {"properties": {"id": {"const": "AQ1"}, "question": {"const": "What just occurred?"}}}
-          ]
-        },
-        {"$ref": "#/$defs/end_turn_pair"},
-        {
-          "allOf": [
-            {"$ref": "#/$defs/ordinary_pair"},
-            {"properties": {"id": {"const": "AQ3"}, "question": {"const": "Why did it occur?"}}}
-          ]
-        },
-        {
-          "allOf": [
-            {"$ref": "#/$defs/ordinary_pair"},
-            {"properties": {"id": {"const": "AQ4"}, "question": {"const": "What did it operate on?"}}}
-          ]
-        },
-        {
-          "allOf": [
-            {"$ref": "#/$defs/ordinary_pair"},
-            {"properties": {"id": {"const": "AQ5"}, "question": {"const": "What actually happened?"}}}
-          ]
-        },
-        {
-          "allOf": [
-            {"$ref": "#/$defs/ordinary_pair"},
-            {"properties": {"id": {"const": "AQ6"}, "question": {"const": "What artifacts or state changed?"}}}
-          ]
-        },
-        {
-          "allOf": [
-            {"$ref": "#/$defs/ordinary_pair"},
-            {"properties": {"id": {"const": "AQ7"}, "question": {"const": "What is its status?"}}}
-          ]
-        },
-        {
-          "allOf": [
-            {"$ref": "#/$defs/ordinary_pair"},
-            {"properties": {"id": {"const": "AQ8"}, "question": {"const": "What evidence supports that status or result?"}}}
-          ]
-        }
+        {"allOf": [{"$ref": "#/$defs/pair"}, {"properties": {"id": {"const": "AQ1"}, "question": {"const": "What just occurred?"}}}]},
+        {"allOf": [{"$ref": "#/$defs/pair"}, {"properties": {"id": {"const": "AQ2"}, "question": {"const": "Is this action an end-of-turn attempt? Answer YES or NO."}, "answer": {"enum": ["YES", "NO"]}}}]},
+        {"allOf": [{"$ref": "#/$defs/pair"}, {"properties": {"id": {"const": "AQ3"}, "question": {"const": "Why did it occur?"}}}]},
+        {"allOf": [{"$ref": "#/$defs/pair"}, {"properties": {"id": {"const": "AQ4"}, "question": {"const": "What did it operate on?"}}}]},
+        {"allOf": [{"$ref": "#/$defs/pair"}, {"properties": {"id": {"const": "AQ5"}, "question": {"const": "What actually happened?"}}}]},
+        {"allOf": [{"$ref": "#/$defs/pair"}, {"properties": {"id": {"const": "AQ6"}, "question": {"const": "What artifacts or state changed?"}}}]},
+        {"allOf": [{"$ref": "#/$defs/pair"}, {"properties": {"id": {"const": "AQ7"}, "question": {"const": "What is its status?"}}}]},
+        {"allOf": [{"$ref": "#/$defs/pair"}, {"properties": {"id": {"const": "AQ8"}, "question": {"const": "What evidence supports that status or result?"}}}]}
+      ]
+    },
+    "router_cycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cycle_id", "scope", "pairs", "directive"],
+      "properties": {
+        "cycle_id": {"type": "string", "minLength": 1},
+        "scope": {"type": "string", "enum": ["worker", "orchestrator"]},
+        "pairs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/pair"}},
+        "directive": {"type": "string", "enum": ["CONTINUE", "COMPLETE", "IMPASSE"]},
+        "instruction": {"type": "string", "minLength": 1},
+        "impasse_evidence": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {"if": {"properties": {"directive": {"const": "CONTINUE"}}, "required": ["directive"]}, "then": {"required": ["instruction"]}},
+        {"if": {"properties": {"directive": {"const": "IMPASSE"}}, "required": ["directive"]}, "then": {"required": ["impasse_evidence"]}}
       ]
     },
     "recorder_invocation": {
@@ -134,41 +106,24 @@
         "source": {"$ref": "#/$defs/source"}
       }
     },
-    "router_cycle": {
+    "end_turn_result": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["action_type", "sequence", "recorded_at", "scope", "pairs", "directive"],
+      "required": ["action_type", "sequence", "recorded_at", "scope", "router_cycle"],
       "properties": {
-        "action_type": {"const": "router_cycle"},
+        "action_type": {"const": "end_turn_result"},
         "sequence": {"type": "integer", "minimum": 1},
         "recorded_at": {"type": "string", "format": "date-time"},
         "scope": {"type": "string", "enum": ["worker", "orchestrator"]},
-        "pairs": {
-          "type": "array",
-          "minItems": 1,
-          "items": {"$ref": "#/$defs/ordinary_pair"}
-        },
-        "directive": {"type": "string", "enum": ["CONTINUE", "COMPLETE", "IMPASSE"]},
-        "instruction": {"type": "string", "minLength": 1},
-        "impasse_evidence": {"type": "string", "minLength": 1},
+        "router_cycle": {"$ref": "#/$defs/router_cycle"},
         "source": {"$ref": "#/$defs/source"}
-      },
-      "allOf": [
-        {
-          "if": {"properties": {"directive": {"const": "CONTINUE"}}, "required": ["directive"]},
-          "then": {"required": ["instruction"]}
-        },
-        {
-          "if": {"properties": {"directive": {"const": "IMPASSE"}}, "required": ["directive"]},
-          "then": {"required": ["impasse_evidence"]}
-        }
-      ]
+      }
     },
     "action": {
       "oneOf": [
         {"$ref": "#/$defs/recorder_invocation"},
         {"$ref": "#/$defs/action_questionnaire"},
-        {"$ref": "#/$defs/router_cycle"}
+        {"$ref": "#/$defs/end_turn_result"}
       ]
     }
   }

@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Immutable execution-record appender and questionnaire bootstrapper.
+"""Immutable execution-record appender and action-questioner bootstrapper.
 
-External action tracking always enters through ``invoke``. The recorder does
-not know why it was invoked and does not classify the action. It appends only a
-``recorder_invocation`` action with the current timestamp, then starts the
-action questioner.
+External tracking enters through ``invoke``. The recorder does not know why it
+was invoked and never classifies the tracked action. It appends only a
+``recorder_invocation`` action with a recorder-generated timestamp, then starts
+``action_questioner.py``.
 
-Canonical child scripts send already-formatted data objects back through
-``append``. ``append`` stores those objects without starting another questioner,
-which prevents recursive audit machinery.
+Canonical child scripts return already-formatted action objects through
+``append``. Appending a child object never starts another questionnaire.
 """
 from __future__ import annotations
 
@@ -28,8 +27,7 @@ STAMP_RE = re.compile(r"^execution-record_(\d{8}T\d{12}Z)\.json$")
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 SCOPES = {"worker", "orchestrator"}
 DIRECTIVES = {"CONTINUE", "COMPLETE", "IMPASSE"}
-
-QUESTIONNAIRE = [
+ACTION_QUESTIONS = [
     ("AQ1", "What just occurred?"),
     ("AQ2", "Is this action an end-of-turn attempt? Answer YES or NO."),
     ("AQ3", "Why did it occur?"),
@@ -98,10 +96,10 @@ def validate_source(value: Any, label: str) -> None:
             raise ValueError(f"{label}.{key} must be a string or null")
 
 
-def validate_pairs(pairs: Any, label: str, questionnaire: bool = False) -> None:
+def validate_pairs(pairs: Any, label: str, canonical: bool = False) -> None:
     if not isinstance(pairs, list) or not pairs:
         raise ValueError(f"{label} must be a non-empty array")
-    if questionnaire and len(pairs) != 8:
+    if canonical and len(pairs) != len(ACTION_QUESTIONS):
         raise ValueError(f"{label} must contain exactly eight pairs")
     for index, pair in enumerate(pairs):
         if not isinstance(pair, dict):
@@ -110,12 +108,30 @@ def validate_pairs(pairs: Any, label: str, questionnaire: bool = False) -> None:
         require_text(pair["id"], f"{label}[{index}].id")
         require_text(pair["question"], f"{label}[{index}].question")
         require_text(pair["answer"], f"{label}[{index}].answer")
-        if questionnaire:
-            expected_id, expected_question = QUESTIONNAIRE[index]
+        if canonical:
+            expected_id, expected_question = ACTION_QUESTIONS[index]
             if pair["id"] != expected_id or pair["question"] != expected_question:
-                raise ValueError(f"{label}[{index}] does not match {expected_id}")
+                raise ValueError(f"{label}[{index}] does not match canonical {expected_id}")
             if expected_id == "AQ2" and pair["answer"] not in {"YES", "NO"}:
                 raise ValueError("AQ2 answer must be YES or NO")
+
+
+def validate_router_cycle(value: Any, label: str) -> None:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object")
+    required = {"cycle_id", "scope", "pairs", "directive"}
+    optional = {"instruction", "impasse_evidence"}
+    exact_fields(value, required, optional, label)
+    require_text(value["cycle_id"], f"{label}.cycle_id")
+    if value["scope"] not in SCOPES:
+        raise ValueError(f"{label}.scope is invalid")
+    validate_pairs(value["pairs"], f"{label}.pairs")
+    if value["directive"] not in DIRECTIVES:
+        raise ValueError(f"{label}.directive is invalid")
+    if value["directive"] == "CONTINUE":
+        require_text(value.get("instruction"), f"{label}.instruction")
+    if value["directive"] == "IMPASSE":
+        require_text(value.get("impasse_evidence"), f"{label}.impasse_evidence")
 
 
 def validate_action(action: Any, persisted: bool) -> dict[str, Any]:
@@ -125,27 +141,18 @@ def validate_action(action: Any, persisted: bool) -> dict[str, Any]:
     optional = {"source"}
     if persisted:
         common |= {"sequence", "recorded_at"}
-
     action_type = action.get("action_type")
+
     if action_type == "recorder_invocation":
         exact_fields(action, common, optional, "recorder_invocation")
     elif action_type == "action_questionnaire":
         exact_fields(action, common | {"pairs"}, optional, "action_questionnaire")
-        validate_pairs(action["pairs"], "action_questionnaire.pairs", questionnaire=True)
-    elif action_type == "router_cycle":
-        exact_fields(
-            action,
-            common | {"pairs", "directive"},
-            optional | {"instruction", "impasse_evidence"},
-            "router_cycle",
-        )
-        validate_pairs(action["pairs"], "router_cycle.pairs")
-        if action["directive"] not in DIRECTIVES:
-            raise ValueError("router_cycle.directive is invalid")
-        if action["directive"] == "CONTINUE":
-            require_text(action.get("instruction"), "router_cycle.instruction")
-        if action["directive"] == "IMPASSE":
-            require_text(action.get("impasse_evidence"), "router_cycle.impasse_evidence")
+        validate_pairs(action["pairs"], "action_questionnaire.pairs", canonical=True)
+    elif action_type == "end_turn_result":
+        exact_fields(action, common | {"router_cycle"}, optional, "end_turn_result")
+        validate_router_cycle(action["router_cycle"], "end_turn_result.router_cycle")
+        if action["router_cycle"]["scope"] != action["scope"]:
+            raise ValueError("end_turn_result scope must match router_cycle scope")
     else:
         raise ValueError(f"unsupported action_type: {action_type!r}")
 
@@ -218,7 +225,6 @@ def append_payload(payload: dict[str, Any], args: argparse.Namespace) -> dict[st
     action = {**payload, "sequence": len(actions) + 1, "recorded_at": now_iso()}
     validate_action(action, persisted=True)
     actions.append(action)
-
     stamp = make_stamp(prior_stamp)
     filename = f"{RECORD_PREFIX}{stamp}{RECORD_SUFFIX}"
     record = {
@@ -258,10 +264,7 @@ def run_json(command: list[str]) -> dict[str, Any]:
     stdout = completed.stdout.strip()
     if not stdout:
         raise RuntimeError(f"child script produced no JSON; stderr={completed.stderr.strip()!r}")
-    try:
-        data = json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"child script produced invalid JSON: {stdout!r}") from exc
+    data = json.loads(stdout)
     if completed.returncode != 0:
         raise RuntimeError(f"child script failed: {data!r}")
     return data
@@ -273,28 +276,17 @@ def cmd_invoke(args: argparse.Namespace) -> int:
     if source:
         payload["source"] = source
     receipt = append_payload(payload, args)
-
     state_path = Path(args.state_dir) / f"action-questioner-{now_stamp()}.json"
     command = [
-        sys.executable,
-        args.questioner,
-        "start",
-        "--state",
-        str(state_path),
-        "--scope",
-        args.scope,
-        "--recorder",
-        str(Path(__file__).resolve()),
-        "--router",
-        args.router,
-        "--output-dir",
-        args.output_dir,
-        "--record",
-        receipt["record"],
-        "--record-name",
-        receipt["record_filename"],
-        "--record-id",
-        receipt["record_id"],
+        sys.executable, args.questioner, "start",
+        "--state", str(state_path),
+        "--scope", args.scope,
+        "--recorder", str(Path(__file__).resolve()),
+        "--router", args.router,
+        "--output-dir", args.output_dir,
+        "--record", receipt["record"],
+        "--record-name", receipt["record_filename"],
+        "--record-id", receipt["record_id"],
     ]
     if args.chat_id is not None:
         command += ["--chat-id", args.chat_id]
@@ -309,8 +301,7 @@ def cmd_append(args: argparse.Namespace) -> int:
     payload = read_json(Path(args.action_file))
     if payload.get("action_type") == "recorder_invocation":
         raise ValueError("recorder_invocation is created only by invoke")
-    receipt = append_payload(payload, args)
-    print(json.dumps(receipt, ensure_ascii=False))
+    print(json.dumps(append_payload(payload, args), ensure_ascii=False))
     return 0
 
 
@@ -324,7 +315,6 @@ def add_record_args(parser: argparse.ArgumentParser) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="mode", required=True)
-
     invoke = sub.add_parser("invoke")
     add_record_args(invoke)
     invoke.add_argument("--scope", required=True, choices=sorted(SCOPES))
@@ -334,12 +324,10 @@ def main() -> int:
     invoke.add_argument("--chat-id")
     invoke.add_argument("--chat-title")
     invoke.set_defaults(fn=cmd_invoke)
-
     append = sub.add_parser("append")
     add_record_args(append)
     append.add_argument("--action-file", required=True)
     append.set_defaults(fn=cmd_append)
-
     args = ap.parse_args()
     try:
         return args.fn(args)

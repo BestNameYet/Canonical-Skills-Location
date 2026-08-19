@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Eight-question action classifier and end-turn dispatcher.
+"""Eight-question action interview and end-turn-router proxy.
 
-The recorder starts this script after recording an invocation. This script asks
-exactly eight canonical questions. AQ2 is a strict YES/NO end-turn question so
-routing never depends on interpreting free-form action-type prose.
+The recorder starts this script after persisting a ``recorder_invocation``.
+This script owns the eight action questions. AQ2 is the sole routing test and
+accepts only YES/NO (with Y/N aliases).
 
-After AQ8 it sends the complete ordered question/answer data object to the
-recorder. If AQ2 was YES, it then invokes the canonical end-turn router using
-the newly appended snapshot as that cycle's predecessor.
+After the eight-question interview, the questioner returns its formatted action
+object to the recorder. If AQ2 is YES, the questioner then invokes and proxies
+all interaction with ``end_turn_router.py``. The router never talks to the
+recorder. When the router returns its completed data object, this script wraps
+that object as ``end_turn_result`` and returns the wrapper to the recorder.
 """
 from __future__ import annotations
 
@@ -63,106 +65,123 @@ def load(path: Path) -> dict[str, Any]:
     return value
 
 
+def run_json(command: list[str]) -> dict[str, Any]:
+    completed = subprocess.run(command, capture_output=True, text=True)
+    stdout = completed.stdout.strip()
+    if not stdout:
+        raise RuntimeError(f"child script produced no JSON; stderr={completed.stderr.strip()!r}")
+    data = json.loads(stdout)
+    if completed.returncode != 0:
+        raise RuntimeError(f"child script failed: {data!r}")
+    return data
+
+
 def normalize_yes_no(raw: str) -> str:
     value = raw.strip().upper()
-    aliases = {"Y": "YES", "N": "NO"}
-    value = aliases.get(value, value)
+    value = {"Y": "YES", "N": "NO"}.get(value, value)
     if value not in {"YES", "NO"}:
         raise ValueError("AQ2 requires YES/NO or Y/N")
     return value
 
 
-def current_payload(state: dict[str, Any]) -> dict[str, Any]:
+def source_from_state(state: dict[str, Any]) -> dict[str, Any] | None:
+    value = state.get("source") or {}
+    return value or None
+
+
+def action_question_payload(state: dict[str, Any]) -> dict[str, Any]:
     index = state["question_index"]
     qid, question, allowed = QUESTIONS[index]
-    result = {
+    out = {
         "status": "QUESTION",
+        "phase": "action_questionnaire",
         "state": state["state_path"],
         "question_number": index + 1,
         "question_id": qid,
         "question": question,
     }
     if allowed:
-        result["allowed_answers"] = allowed
-    return result
+        out["allowed_answers"] = allowed
+    return out
 
 
-def run_json(command: list[str]) -> dict[str, Any]:
-    completed = subprocess.run(command, capture_output=True, text=True)
-    stdout = completed.stdout.strip()
-    if not stdout:
-        raise RuntimeError(f"child script produced no JSON; stderr={completed.stderr.strip()!r}")
-    try:
-        data = json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"child script produced invalid JSON: {stdout!r}") from exc
-    if completed.returncode != 0:
-        raise RuntimeError(f"child script failed: {data!r}")
-    return data
+def router_question_payload(state: dict[str, Any], router_output: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": "QUESTION",
+        "phase": "end_turn_router",
+        "state": state["state_path"],
+        "question_id": router_output["question_id"],
+        "question": router_output["question"],
+        "allowed_answers": router_output["allowed_answers"],
+        "cycle_id": router_output["cycle_id"],
+    }
 
 
-def append_questionnaire(state: dict[str, Any]) -> dict[str, Any]:
-    pairs = []
-    for qid, question, _ in QUESTIONS:
-        pairs.append({"id": qid, "question": question, "answer": state["answers"][qid]})
-    payload = {
+def recorder_append(state: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    payload_path = Path(state["state_path"]).with_name(f"questioner-return-{uuid.uuid4().hex}.json")
+    write_json(payload_path, payload)
+    receipt = run_json([
+        sys.executable, state["recorder"], "append",
+        "--output-dir", state["output_dir"],
+        "--record", state["record"],
+        "--record-name", state["record_name"],
+        "--record-id", state["record_id"],
+        "--action-file", str(payload_path),
+    ])
+    state["record"] = receipt["record"]
+    state["record_name"] = receipt["record_filename"]
+    state["record_id"] = receipt["record_id"]
+    state["updated_at"] = now()
+    write_json(Path(state["state_path"]), state)
+    return receipt
+
+
+def finish_action_questionnaire(state: dict[str, Any]) -> dict[str, Any]:
+    pairs = [
+        {"id": qid, "question": question, "answer": state["answers"][qid]}
+        for qid, question, _ in QUESTIONS
+    ]
+    payload: dict[str, Any] = {
         "action_type": "action_questionnaire",
         "scope": state["scope"],
         "pairs": pairs,
     }
-    if state.get("source"):
-        payload["source"] = state["source"]
-    payload_path = Path(state["state_path"]).with_suffix(".action.json")
-    write_json(payload_path, payload)
-    command = [
-        sys.executable,
-        state["recorder"],
-        "append",
-        "--output-dir",
-        state["output_dir"],
-        "--record",
-        state["record"],
-        "--record-name",
-        state["record_name"],
-        "--record-id",
-        state["record_id"],
-        "--action-file",
-        str(payload_path),
-    ]
-    return run_json(command)
+    source = source_from_state(state)
+    if source:
+        payload["source"] = source
+    return recorder_append(state, payload)
 
 
-def start_router(state: dict[str, Any], receipt: dict[str, Any]) -> dict[str, Any]:
+def start_router(state: dict[str, Any]) -> dict[str, Any]:
     router_state = Path(state["state_path"]).with_name(f"end-turn-router-{uuid.uuid4().hex}.json")
-    command = [
-        sys.executable,
-        state["router"],
-        "start",
-        "--state",
-        str(router_state),
-        "--scope",
-        state["scope"],
-        "--recorder",
-        state["recorder"],
-        "--output-dir",
-        state["output_dir"],
-        "--record",
-        receipt["record"],
-        "--record-name",
-        receipt["record_filename"],
-        "--record-id",
-        receipt["record_id"],
-    ]
-    if state.get("source", {}).get("chat_id") is not None:
-        command += ["--chat-id", state["source"]["chat_id"]]
-    if state.get("source", {}).get("chat_title") is not None:
-        command += ["--chat-title", state["source"]["chat_title"]]
-    return run_json(command)
+    router_output = run_json([
+        sys.executable, state["router"], "start",
+        "--state", str(router_state),
+        "--scope", state["scope"],
+    ])
+    state["phase"] = "end_turn_router"
+    state["router_state"] = str(router_state)
+    state["router_cycle_id"] = router_output["cycle_id"]
+    state["updated_at"] = now()
+    write_json(Path(state["state_path"]), state)
+    return router_output
+
+
+def append_end_turn_result(state: dict[str, Any], router_data: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "action_type": "end_turn_result",
+        "scope": state["scope"],
+        "router_cycle": router_data,
+    }
+    source = source_from_state(state)
+    if source:
+        payload["source"] = source
+    return recorder_append(state, payload)
 
 
 def cmd_start(args: argparse.Namespace) -> int:
     state_path = Path(args.state)
-    source = {}
+    source: dict[str, Any] = {}
     if args.chat_id is not None:
         source["chat_id"] = args.chat_id
     if args.chat_title is not None:
@@ -170,7 +189,9 @@ def cmd_start(args: argparse.Namespace) -> int:
     state = {
         "session_id": uuid.uuid4().hex,
         "started_at": now(),
+        "updated_at": now(),
         "state_path": str(state_path),
+        "phase": "action_questionnaire",
         "question_index": 0,
         "answers": {},
         "scope": args.scope,
@@ -183,18 +204,16 @@ def cmd_start(args: argparse.Namespace) -> int:
         "source": source,
     }
     write_json(state_path, state)
-    print(json.dumps(current_payload(state), ensure_ascii=False))
+    print(json.dumps(action_question_payload(state), ensure_ascii=False))
     return 0
 
 
-def cmd_answer(args: argparse.Namespace) -> int:
-    state_path = Path(args.state)
-    state = load(state_path)
+def answer_action_question(state: dict[str, Any], raw: str) -> dict[str, Any]:
     index = state["question_index"]
     if index < 0 or index >= len(QUESTIONS):
-        raise ValueError("questioner is not waiting for an answer")
+        raise ValueError("action questionnaire is not waiting for an answer")
     qid, _, allowed = QUESTIONS[index]
-    text = args.answer.strip()
+    text = raw.strip()
     if not text:
         raise ValueError("answer must not be empty")
     if allowed:
@@ -202,33 +221,80 @@ def cmd_answer(args: argparse.Namespace) -> int:
     state["answers"][qid] = text
     state["question_index"] = index + 1
     state["updated_at"] = now()
-    write_json(state_path, state)
+    write_json(Path(state["state_path"]), state)
 
     if state["question_index"] < len(QUESTIONS):
-        print(json.dumps(current_payload(state), ensure_ascii=False))
-        return 0
+        return action_question_payload(state)
 
-    receipt = append_questionnaire(state)
+    questionnaire_receipt = finish_action_questionnaire(state)
+    state["questionnaire_receipt"] = questionnaire_receipt
+    write_json(Path(state["state_path"]), state)
+
+    if state["answers"]["AQ2"] == "NO":
+        state["phase"] = "complete"
+        state["completed_at"] = now()
+        write_json(Path(state["state_path"]), state)
+        return {
+            "status": "QUESTIONNAIRE_COMPLETE",
+            "phase": "complete",
+            "state": state["state_path"],
+            "record": questionnaire_receipt,
+        }
+
+    router_output = start_router(state)
+    return router_question_payload(state, router_output)
+
+
+def answer_router(state: dict[str, Any], raw: str) -> dict[str, Any]:
+    router_output = run_json([
+        sys.executable, state["router"], "answer",
+        "--state", state["router_state"],
+        "--answer", raw,
+    ])
+    if router_output.get("status") == "QUESTION":
+        return router_question_payload(state, router_output)
+    if router_output.get("status") != "DIRECTIVE" or not isinstance(router_output.get("data_object"), dict):
+        raise RuntimeError(f"router returned unexpected terminal payload: {router_output!r}")
+
+    router_data = router_output["data_object"]
+    receipt = append_end_turn_result(state, router_data)
+    state["phase"] = "complete"
     state["completed_at"] = now()
-    state["questionnaire_record"] = receipt
-    write_json(state_path, state)
+    state["end_turn_receipt"] = receipt
+    state["directive"] = router_data["directive"]
+    write_json(Path(state["state_path"]), state)
+    out = {
+        "status": "DIRECTIVE",
+        "phase": "complete",
+        "state": state["state_path"],
+        "cycle_id": router_data["cycle_id"],
+        "directive": router_data["directive"],
+        "record": receipt,
+        "end_turn": router_data,
+    }
+    if "instruction" in router_data:
+        out["instruction"] = router_data["instruction"]
+    if "impasse_evidence" in router_data:
+        out["impasse_evidence"] = router_data["impasse_evidence"]
+    return out
 
-    if state["answers"]["AQ2"] == "YES":
-        router = start_router(state, receipt)
-        state["router_started_at"] = now()
-        state["router_state"] = router.get("state")
-        write_json(state_path, state)
-        print(json.dumps({"status": "ROUTER_STARTED", "questionnaire_record": receipt, "router": router}, ensure_ascii=False))
-        return 0
 
-    print(json.dumps({"status": "QUESTIONNAIRE_COMPLETE", "questionnaire_record": receipt}, ensure_ascii=False))
+def cmd_answer(args: argparse.Namespace) -> int:
+    state = load(Path(args.state))
+    phase = state.get("phase")
+    if phase == "action_questionnaire":
+        result = answer_action_question(state, args.answer)
+    elif phase == "end_turn_router":
+        result = answer_router(state, args.answer)
+    else:
+        raise ValueError("questioner session is already complete")
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="mode", required=True)
-
     start = sub.add_parser("start")
     start.add_argument("--state", required=True)
     start.add_argument("--scope", required=True, choices=sorted(SCOPES))
@@ -241,12 +307,10 @@ def main() -> int:
     start.add_argument("--chat-id")
     start.add_argument("--chat-title")
     start.set_defaults(fn=cmd_start)
-
     answer = sub.add_parser("answer")
     answer.add_argument("--state", required=True)
     answer.add_argument("--answer", required=True)
     answer.set_defaults(fn=cmd_answer)
-
     args = ap.parse_args()
     try:
         return args.fn(args)
