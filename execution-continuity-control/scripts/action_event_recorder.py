@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Interactive execution-event recorder using timestamped project snapshots.
+"""Append one completed action to an immutable execution-record snapshot.
 
-Persistent records follow ``execution-record.schema.json``. Each entry is an
-incremental event delta: do not restate history already present in earlier
-entries unless needed to identify the new event or its dependency. Runtime
-session and receipt files are implementation bookkeeping and do not declare
-independent format identities.
+This recorder is deliberately non-interactive. It never asks the eight-action
+questions. Ordinary actions are supplied directly with ``record``. Structured
+actions produced by other canonical scripts, such as ``action_questioner.py``
+or ``end_turn_router.py``, are supplied with ``append``.
+
+Every successful invocation writes a new complete snapshot. The predecessor is
+never modified.
 """
 from __future__ import annotations
 
@@ -13,29 +15,26 @@ import argparse
 import hashlib
 import json
 import re
-import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 RECORD_PREFIX = "execution-record_"
 RECORD_SUFFIX = ".json"
-FORMAT_VERSION = 1
-UNAVAILABLE = "unavailable"
-
 STAMP_RE = re.compile(r"^execution-record_(\d{8}T\d{12}Z)\.json$")
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
-ENTRY_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+SCOPES = {"worker", "orchestrator"}
+DIRECTIVES = {"CONTINUE", "COMPLETE", "IMPASSE"}
 
-ROOT_FIELDS = {"format_version", "created_at", "updated_at", "snapshot", "project", "entries"}
-SNAPSHOT_FIELDS = {"timestamp", "filename", "predecessor_filename", "predecessor_sha256"}
-PROJECT_FIELDS = {"project_id", "project_title"}
-ENTRY_FIELDS = {"entry_id", "sequence", "recorded_at", "chat_id", "chat_title", "event", "outcome", "evidence"}
-
-QUESTIONS = [
-    ("event", "What new event occurred? Record only the delta from prior entries, including the relevant action or target."),
-    ("outcome", "What new outcome or resulting state followed from that event?"),
-    ("evidence", "What new observable evidence supports that outcome?"),
+ACTION_QUESTIONS = [
+    ("AQ1", "What just occurred?"),
+    ("AQ2", "What type was it?"),
+    ("AQ3", "Why did it occur?"),
+    ("AQ4", "What did it operate on?"),
+    ("AQ5", "What actually happened?"),
+    ("AQ6", "What artifacts or state changed?"),
+    ("AQ7", "What is its status?"),
+    ("AQ8", "What evidence supports that status or result?"),
 ]
 
 
@@ -47,22 +46,17 @@ def now_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 
 
-def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def normalize_exposed(value: str | None) -> str:
-    value = (value or "").strip()
-    return value if value else UNAVAILABLE
-
-
 def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def write_json(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def require_text(value: Any, label: str) -> str:
@@ -71,12 +65,12 @@ def require_text(value: Any, label: str) -> str:
     return value
 
 
-def require_exact_fields(obj: dict[str, Any], expected: set[str], label: str) -> None:
+def require_exact_fields(obj: dict[str, Any], required: set[str], optional: set[str], label: str) -> None:
     actual = set(obj)
-    if actual != expected:
-        missing = sorted(expected - actual)
-        extra = sorted(actual - expected)
-        raise ValueError(f"{label} fields invalid: missing={missing!r}, extra={extra!r}")
+    missing = required - actual
+    extra = actual - required - optional
+    if missing or extra:
+        raise ValueError(f"{label} fields invalid: missing={sorted(missing)!r}, extra={sorted(extra)!r}")
 
 
 def validate_iso(value: Any, label: str) -> None:
@@ -89,331 +83,292 @@ def validate_iso(value: Any, label: str) -> None:
         raise ValueError(f"{label} must include timezone information")
 
 
-def parse_persisted_stamp(filename: str) -> str:
+def parse_stamp(filename: str) -> str:
     match = STAMP_RE.fullmatch(filename)
     if not match:
         raise ValueError("record filename must match execution-record_YYYYMMDDTHHMMSSffffffZ.json")
     return match.group(1)
 
 
-def compact_legacy_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    event_parts = [str(entry.get("occurred", "")).strip()]
-    for key in ("type", "purpose", "operated_on"):
-        value = str(entry.get(key, "")).strip()
-        if value:
-            event_parts.append(f"{key}={value}")
-
-    outcome_parts = [str(entry.get("result", "")).strip()]
-    for key in ("state_change", "status"):
-        value = str(entry.get(key, "")).strip()
-        if value:
-            outcome_parts.append(f"{key}={value}")
-
-    return {
-        "entry_id": entry.get("entry_id"),
-        "sequence": entry.get("sequence"),
-        "recorded_at": entry.get("recorded_at"),
-        "chat_id": normalize_exposed(entry.get("chat_id")),
-        "chat_title": normalize_exposed(entry.get("chat_title")),
-        "event": " | ".join(part for part in event_parts if part),
-        "outcome": " | ".join(part for part in outcome_parts if part),
-        "evidence": str(entry.get("evidence", "")).strip(),
-    }
+def validate_source(source: Any, label: str) -> None:
+    if not isinstance(source, dict):
+        raise ValueError(f"{label} must be an object")
+    require_exact_fields(source, set(), {"chat_id", "chat_title"}, label)
+    for key, value in source.items():
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{label}.{key} must be a string or null")
 
 
-def normalize_record_format(record: Any) -> dict[str, Any]:
-    if not isinstance(record, dict):
-        raise ValueError("record must be a JSON object")
+def validate_pairs(pairs: Any, label: str, exact_questions: list[tuple[str, str]] | None = None) -> None:
+    if not isinstance(pairs, list) or not pairs:
+        raise ValueError(f"{label} must be a non-empty array")
+    if exact_questions is not None and len(pairs) != len(exact_questions):
+        raise ValueError(f"{label} must contain exactly {len(exact_questions)} pairs")
+    for index, pair in enumerate(pairs):
+        if not isinstance(pair, dict):
+            raise ValueError(f"{label}[{index}] must be an object")
+        require_exact_fields(pair, {"id", "question", "answer"}, set(), f"{label}[{index}]")
+        require_text(pair["id"], f"{label}[{index}].id")
+        require_text(pair["question"], f"{label}[{index}].question")
+        require_text(pair["answer"], f"{label}[{index}].answer")
+        if exact_questions is not None:
+            expected_id, expected_question = exact_questions[index]
+            if pair["id"] != expected_id or pair["question"] != expected_question:
+                raise ValueError(f"{label}[{index}] does not match canonical question {expected_id}")
 
-    if record.get("format_version") == FORMAT_VERSION:
-        return dict(record)
 
-    legacy_required = {"created_at", "updated_at", "snapshot", "project", "entries"}
-    if legacy_required.issubset(record) and isinstance(record.get("entries"), list):
-        return {
-            "format_version": FORMAT_VERSION,
-            "created_at": record["created_at"],
-            "updated_at": record["updated_at"],
-            "snapshot": record["snapshot"],
-            "project": record["project"],
-            "entries": [compact_legacy_entry(entry) for entry in record["entries"]],
-        }
+def validate_action(action: Any, persisted: bool) -> dict[str, Any]:
+    if not isinstance(action, dict):
+        raise ValueError("action must be a JSON object")
 
-    raise ValueError("unsupported execution-record format")
+    common_required = {"action_type", "scope"}
+    common_optional = {"source"}
+    if persisted:
+        common_required |= {"sequence", "recorded_at"}
+
+    action_type = action.get("action_type")
+    if action_type == "recorded_action":
+        required = common_required | {"action", "result"}
+        optional = common_optional | {"evidence"}
+        require_exact_fields(action, required, optional, "recorded_action")
+        require_text(action["action"], "recorded_action.action")
+        require_text(action["result"], "recorded_action.result")
+        if "evidence" in action:
+            if not isinstance(action["evidence"], list):
+                raise ValueError("recorded_action.evidence must be an array")
+            for i, item in enumerate(action["evidence"]):
+                require_text(item, f"recorded_action.evidence[{i}]")
+    elif action_type == "action_questionnaire":
+        required = common_required | {"subject_sequence", "pairs"}
+        optional = common_optional
+        require_exact_fields(action, required, optional, "action_questionnaire")
+        if not isinstance(action["subject_sequence"], int) or isinstance(action["subject_sequence"], bool) or action["subject_sequence"] < 1:
+            raise ValueError("action_questionnaire.subject_sequence must be a positive integer")
+        validate_pairs(action["pairs"], "action_questionnaire.pairs", ACTION_QUESTIONS)
+    elif action_type == "router_cycle":
+        required = common_required | {"pairs", "directive"}
+        optional = common_optional | {"cycle_id", "instruction", "impasse_evidence"}
+        require_exact_fields(action, required, optional, "router_cycle")
+        validate_pairs(action["pairs"], "router_cycle.pairs")
+        if action["directive"] not in DIRECTIVES:
+            raise ValueError("router_cycle.directive is invalid")
+        if "cycle_id" in action:
+            require_text(action["cycle_id"], "router_cycle.cycle_id")
+        if action["directive"] == "CONTINUE":
+            require_text(action.get("instruction"), "router_cycle.instruction")
+        if action["directive"] == "IMPASSE":
+            require_text(action.get("impasse_evidence"), "router_cycle.impasse_evidence")
+    else:
+        raise ValueError(f"unsupported action_type: {action_type!r}")
+
+    if action["scope"] not in SCOPES:
+        raise ValueError("scope must be 'worker' or 'orchestrator'")
+    if "source" in action:
+        validate_source(action["source"], f"{action_type}.source")
+
+    if persisted:
+        if not isinstance(action["sequence"], int) or isinstance(action["sequence"], bool) or action["sequence"] < 1:
+            raise ValueError("sequence must be a positive integer")
+        validate_iso(action["recorded_at"], "recorded_at")
+    return dict(action)
 
 
 def validate_record(record: Any) -> dict[str, Any]:
-    record = normalize_record_format(record)
-    require_exact_fields(record, ROOT_FIELDS, "record")
-    if record["format_version"] != FORMAT_VERSION:
-        raise ValueError("unsupported format_version")
+    if not isinstance(record, dict):
+        raise ValueError("record must be a JSON object")
+    require_exact_fields(
+        record,
+        {"record_id", "snapshot_created_at", "predecessor", "actions"},
+        set(),
+        "record",
+    )
+    require_text(record["record_id"], "record_id")
+    validate_iso(record["snapshot_created_at"], "snapshot_created_at")
 
-    validate_iso(record["created_at"], "created_at")
-    validate_iso(record["updated_at"], "updated_at")
+    predecessor = record["predecessor"]
+    if predecessor is not None:
+        if not isinstance(predecessor, dict):
+            raise ValueError("predecessor must be null or an object")
+        require_exact_fields(predecessor, {"filename", "sha256"}, set(), "predecessor")
+        parse_stamp(require_text(predecessor["filename"], "predecessor.filename"))
+        digest = require_text(predecessor["sha256"], "predecessor.sha256")
+        if not HASH_RE.fullmatch(digest):
+            raise ValueError("predecessor.sha256 must be a lowercase SHA-256 digest")
 
-    snapshot = record["snapshot"]
-    if not isinstance(snapshot, dict):
-        raise ValueError("snapshot must be an object")
-    require_exact_fields(snapshot, SNAPSHOT_FIELDS, "snapshot")
-    stamp = require_text(snapshot["timestamp"], "snapshot.timestamp")
-    filename = require_text(snapshot["filename"], "snapshot.filename")
-    if filename != f"{RECORD_PREFIX}{stamp}{RECORD_SUFFIX}" or parse_persisted_stamp(filename) != stamp:
-        raise ValueError("snapshot filename and timestamp do not agree")
-
-    predecessor_name = snapshot["predecessor_filename"]
-    predecessor_hash = snapshot["predecessor_sha256"]
-    if (predecessor_name is None) != (predecessor_hash is None):
-        raise ValueError("predecessor filename/hash must both be null or both be present")
-    if predecessor_name is not None:
-        predecessor_stamp = parse_persisted_stamp(require_text(predecessor_name, "predecessor_filename"))
-        if predecessor_stamp >= stamp:
-            raise ValueError("predecessor timestamp must be earlier than snapshot timestamp")
-        if not isinstance(predecessor_hash, str) or not HASH_RE.fullmatch(predecessor_hash):
-            raise ValueError("predecessor_sha256 must be a lowercase SHA-256 digest")
-
-    project = record["project"]
-    if not isinstance(project, dict):
-        raise ValueError("project must be an object")
-    require_exact_fields(project, PROJECT_FIELDS, "project")
-    require_text(project["project_id"], "project.project_id")
-    require_text(project["project_title"], "project.project_title")
-
-    entries = record["entries"]
-    if not isinstance(entries, list):
-        raise ValueError("entries must be a list")
-
-    seen_ids: set[str] = set()
-    for expected_sequence, entry in enumerate(entries, start=1):
-        if not isinstance(entry, dict):
-            raise ValueError(f"entry {expected_sequence} must be an object")
-        require_exact_fields(entry, ENTRY_FIELDS, f"entry {expected_sequence}")
-        if entry["sequence"] != expected_sequence:
-            raise ValueError(f"entry {expected_sequence} has non-contiguous sequence")
-        if not isinstance(entry["entry_id"], str) or not ENTRY_ID_RE.fullmatch(entry["entry_id"]):
-            raise ValueError(f"entry {expected_sequence} has invalid entry_id")
-        if entry["entry_id"] in seen_ids:
-            raise ValueError(f"duplicate entry_id: {entry['entry_id']}")
-        seen_ids.add(entry["entry_id"])
-        validate_iso(entry["recorded_at"], f"entry {expected_sequence}.recorded_at")
-        for field in ("chat_id", "chat_title", "event", "outcome", "evidence"):
-            require_text(entry[field], f"entry {expected_sequence}.{field}")
-
-    return record
+    actions = record["actions"]
+    if not isinstance(actions, list) or not actions:
+        raise ValueError("actions must be a non-empty array")
+    for expected, action in enumerate(actions, start=1):
+        validated = validate_action(action, persisted=True)
+        if validated["sequence"] != expected:
+            raise ValueError(f"action sequence must be contiguous; expected {expected}")
+    return dict(record)
 
 
-def new_record(project_id: str, project_title: str, stamp: str) -> dict[str, Any]:
-    return {
-        "format_version": FORMAT_VERSION,
-        "created_at": now_iso(),
-        "updated_at": now_iso(),
-        "snapshot": {
-            "timestamp": stamp,
-            "filename": f"{RECORD_PREFIX}{stamp}{RECORD_SUFFIX}",
-            "predecessor_filename": None,
-            "predecessor_sha256": None,
-        },
-        "project": {"project_id": project_id, "project_title": project_title},
-        "entries": [],
-    }
-
-
-def reconcile_project_identity(record: dict[str, Any], project_id: str, project_title: str) -> None:
-    project = record["project"]
-    existing_id = normalize_exposed(project.get("project_id"))
-    existing_title = normalize_exposed(project.get("project_title"))
-    if existing_id != UNAVAILABLE and project_id != UNAVAILABLE and existing_id != project_id:
-        raise ValueError(f"project_id mismatch: record={existing_id!r}, invocation={project_id!r}")
-    if existing_id == UNAVAILABLE and project_id != UNAVAILABLE:
-        project["project_id"] = project_id
-    if existing_title == UNAVAILABLE and project_title != UNAVAILABLE:
-        project["project_title"] = project_title
-
-
-def load_source_record(source_path: str | None, source_name: str | None, project_id: str, project_title: str) -> tuple[dict[str, Any] | None, str | None, str | None, str | None]:
-    if not source_path:
-        if source_name:
+def load_predecessor(path_text: str | None, persisted_name: str | None, record_id: str | None):
+    if path_text is None:
+        if persisted_name is not None:
             raise ValueError("--record-name requires --record")
+        if not record_id:
+            raise ValueError("--record-id is required for the first snapshot")
         return None, None, None, None
-    if not source_name:
-        raise ValueError("--record-name is required when --record is supplied")
 
-    prior_stamp = parse_persisted_stamp(source_name)
-    path = Path(source_path)
+    if not persisted_name:
+        raise ValueError("--record-name is required with --record")
+    path = Path(path_text)
     if not path.exists():
-        raise FileNotFoundError(f"source record not found: {path}")
-
+        raise FileNotFoundError(path)
+    parse_stamp(persisted_name)
     record = validate_record(read_json(path))
-    reconcile_project_identity(record, project_id, project_title)
-    if record["snapshot"]["filename"] != source_name:
-        raise ValueError("--record-name does not match source snapshot filename")
-    return record, sha256(path), source_name, prior_stamp
+    if record_id and record["record_id"] != record_id:
+        raise ValueError("record_id does not match predecessor")
+    return record, persisted_name, file_sha256(path), parse_stamp(persisted_name)
 
 
-def make_new_stamp(prior_stamp: str | None) -> str:
+def make_stamp(prior_stamp: str | None) -> str:
     stamp = now_stamp()
     if prior_stamp is not None and stamp <= prior_stamp:
         raise ValueError("new snapshot timestamp is not later than predecessor")
     return stamp
 
 
-def append_entry(state: dict[str, Any]) -> tuple[Path, dict[str, Any], str | None]:
-    output_dir = Path(state["output_dir"])
-    project_id = normalize_exposed(state.get("project_id"))
-    project_title = normalize_exposed(state.get("project_title"))
-    chat_id = normalize_exposed(state.get("chat_id"))
-    chat_title = normalize_exposed(state.get("chat_title"))
-
-    prior, source_hash, source_name, prior_stamp = load_source_record(
-        state.get("source_record_path"), state.get("source_persisted_name"), project_id, project_title
+def append_payload(
+    payload: dict[str, Any],
+    output_dir: Path,
+    record_path: str | None,
+    record_name: str | None,
+    record_id: str | None,
+) -> dict[str, Any]:
+    payload = validate_action(payload, persisted=False)
+    prior, predecessor_name, predecessor_hash, prior_stamp = load_predecessor(
+        record_path, record_name, record_id
     )
-    stamp = make_new_stamp(prior_stamp)
-    output_path = output_dir / f"{RECORD_PREFIX}{stamp}{RECORD_SUFFIX}"
+    stamp = make_stamp(prior_stamp)
+    filename = f"{RECORD_PREFIX}{stamp}{RECORD_SUFFIX}"
 
-    record = prior if prior is not None else new_record(project_id, project_title, stamp)
-    if prior is not None:
-        record["format_version"] = FORMAT_VERSION
-        record["updated_at"] = now_iso()
-        record["snapshot"] = {
-            "timestamp": stamp,
-            "filename": output_path.name,
-            "predecessor_filename": source_name,
-            "predecessor_sha256": source_hash,
-        }
+    if prior is None:
+        actions: list[dict[str, Any]] = []
+        resolved_record_id = require_text(record_id, "record_id")
+        predecessor = None
+    else:
+        actions = [dict(item) for item in prior["actions"]]
+        resolved_record_id = prior["record_id"]
+        predecessor = {"filename": predecessor_name, "sha256": predecessor_hash}
 
-    entry = {
-        "entry_id": secrets.token_hex(16),
-        "sequence": len(record["entries"]) + 1,
+    action = {
+        **payload,
+        "sequence": len(actions) + 1,
         "recorded_at": now_iso(),
-        "chat_id": chat_id,
-        "chat_title": chat_title,
-        **state["answers"],
     }
-    record["entries"].append(entry)
-    write_json(output_path, validate_record(record))
-    return output_path, entry, source_hash
+    validate_action(action, persisted=True)
+    actions.append(action)
 
+    record = {
+        "record_id": resolved_record_id,
+        "snapshot_created_at": now_iso(),
+        "predecessor": predecessor,
+        "actions": actions,
+    }
+    validate_record(record)
 
-def validate_session_state(state: Any) -> dict[str, Any]:
-    if not isinstance(state, dict):
-        raise ValueError("recorder session state must be an object")
-    for key in ("session_id", "started_at", "question_index", "answers", "output_dir", "state_dir"):
-        if key not in state:
-            raise ValueError(f"recorder session state missing {key!r}")
-    require_text(state["session_id"], "session_id")
-    validate_iso(state["started_at"], "started_at")
-    if not isinstance(state["question_index"], int) or isinstance(state["question_index"], bool):
-        raise ValueError("question_index must be an integer")
-    if not isinstance(state["answers"], dict):
-        raise ValueError("answers must be an object")
-    return state
-
-
-def start(args: argparse.Namespace) -> int:
-    state_dir = Path(args.state_dir)
-    output_dir = Path(args.output_dir)
-    state_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    if args.record:
-        if not args.record_name:
-            raise ValueError("--record-name is required when --record is supplied")
-        source = Path(args.record)
-        if not source.exists():
-            raise FileNotFoundError(f"source record not found: {source}")
-        record = validate_record(read_json(source))
-        if record["snapshot"]["filename"] != args.record_name:
-            raise ValueError("--record-name does not match source snapshot filename")
-    elif args.record_name:
-        raise ValueError("--record-name requires --record")
-
-    session_id = secrets.token_hex(16)
-    state_path = state_dir / f"recorder-session-{session_id}.json"
-    state = {
-        "session_id": session_id,
-        "started_at": now_iso(),
-        "question_index": 0,
-        "answers": {},
-        "source_record_path": args.record,
-        "source_persisted_name": args.record_name,
-        "output_dir": str(output_dir),
-        "state_dir": str(state_dir),
-        "project_id": normalize_exposed(args.project_id),
-        "project_title": normalize_exposed(args.project_title),
-        "chat_id": normalize_exposed(args.chat_id),
-        "chat_title": normalize_exposed(args.chat_title),
-    }
-    write_json(state_path, state)
-
-    field, question = QUESTIONS[0]
-    print(json.dumps({"status": "QUESTION", "state": str(state_path), "question_number": 1, "field": field, "question": question}, ensure_ascii=False, sort_keys=True))
-    return 0
-
-
-def answer(args: argparse.Namespace) -> int:
-    state_path = Path(args.state)
-    state = validate_session_state(read_json(state_path))
-    if state.get("completed_at"):
-        raise ValueError("session already complete")
-
-    idx = state["question_index"]
-    if idx < 0 or idx >= len(QUESTIONS):
-        raise ValueError("invalid recorder question index")
-
-    text = args.text.strip()
-    if not text:
-        print(json.dumps({"status": "FAIL", "code": "EMPTY_ANSWER", "state": str(state_path), "question_number": idx + 1, "question": QUESTIONS[idx][1]}, ensure_ascii=False, sort_keys=True))
-        return 2
-
-    field, _ = QUESTIONS[idx]
-    state["answers"][field] = text
-    state["question_index"] = idx + 1
-    write_json(state_path, state)
-
-    if state["question_index"] < len(QUESTIONS):
-        next_field, question = QUESTIONS[state["question_index"]]
-        print(json.dumps({"status": "QUESTION", "state": str(state_path), "question_number": state["question_index"] + 1, "field": next_field, "question": question}, ensure_ascii=False, sort_keys=True))
-        return 0
-
-    output_path, entry, source_hash = append_entry(state)
-    receipt = {
+    output_path = output_dir / filename
+    write_json(output_path, record)
+    return {
         "status": "RECORDED",
         "record": str(output_path),
-        "record_filename": output_path.name,
-        "entry_id": entry["entry_id"],
-        "sequence": entry["sequence"],
-        "source_record_filename": state.get("source_persisted_name"),
-        "source_record_sha256": source_hash,
-        "record_sha256": sha256(output_path),
-        "recorded_at": entry["recorded_at"],
+        "record_filename": filename,
+        "record_sha256": file_sha256(output_path),
+        "sequence": action["sequence"],
+        "action_type": action["action_type"],
+        "recorded_at": action["recorded_at"],
+        "predecessor_filename": predecessor_name,
+        "predecessor_sha256": predecessor_hash,
     }
-    receipt_path = Path(state["state_dir"]) / f"recorder-receipt-{entry['entry_id']}.json"
-    write_json(receipt_path, receipt)
-    state.update({"completed_at": now_iso(), "entry_id": entry["entry_id"], "sequence": entry["sequence"], "receipt": str(receipt_path), "record": str(output_path)})
-    write_json(state_path, state)
+
+
+def source_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
+    source: dict[str, Any] = {}
+    if args.chat_id is not None:
+        source["chat_id"] = args.chat_id
+    if args.chat_title is not None:
+        source["chat_title"] = args.chat_title
+    return source or None
+
+
+def cmd_record(args: argparse.Namespace) -> int:
+    payload: dict[str, Any] = {
+        "action_type": "recorded_action",
+        "scope": args.scope,
+        "action": args.action,
+        "result": args.result,
+    }
+    if args.evidence:
+        payload["evidence"] = args.evidence
+    source = source_from_args(args)
+    if source:
+        payload["source"] = source
+    receipt = append_payload(
+        payload,
+        Path(args.output_dir),
+        args.record,
+        args.record_name,
+        args.record_id,
+    )
     print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
     return 0
 
 
+def cmd_append(args: argparse.Namespace) -> int:
+    payload = read_json(Path(args.action_file))
+    receipt = append_payload(
+        payload,
+        Path(args.output_dir),
+        args.record,
+        args.record_name,
+        args.record_id,
+    )
+    print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def add_record_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--record")
+    parser.add_argument("--record-name")
+    parser.add_argument("--record-id")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    sp = ap.add_subparsers(dest="mode", required=True)
-    s = sp.add_parser("start")
-    s.add_argument("--state-dir", required=True)
-    s.add_argument("--output-dir", required=True)
-    s.add_argument("--record")
-    s.add_argument("--record-name")
-    s.add_argument("--project-title", default=UNAVAILABLE)
-    s.add_argument("--project-id", default=UNAVAILABLE)
-    s.add_argument("--chat-title", default=UNAVAILABLE)
-    s.add_argument("--chat-id", default=UNAVAILABLE)
-    a = sp.add_parser("answer")
-    a.add_argument("--state", required=True)
-    a.add_argument("--text", required=True)
+    sub = ap.add_subparsers(dest="mode", required=True)
+
+    record = sub.add_parser("record", help="append a lightweight ordinary action without an interview")
+    add_record_args(record)
+    record.add_argument("--scope", required=True, choices=sorted(SCOPES))
+    record.add_argument("--action", required=True)
+    record.add_argument("--result", required=True)
+    record.add_argument("--evidence", action="append", default=[])
+    record.add_argument("--chat-id")
+    record.add_argument("--chat-title")
+    record.set_defaults(fn=cmd_record)
+
+    append = sub.add_parser("append", help="append a structured action payload produced by another script")
+    add_record_args(append)
+    append.add_argument("--action-file", required=True)
+    append.set_defaults(fn=cmd_append)
+
     args = ap.parse_args()
     try:
-        return start(args) if args.mode == "start" else answer(args)
+        return args.fn(args)
     except Exception as exc:
-        print(json.dumps({"status": "FAIL", "code": type(exc).__name__, "detail": str(exc)}, ensure_ascii=False, sort_keys=True))
+        print(
+            json.dumps(
+                {"status": "FAIL", "code": type(exc).__name__, "detail": str(exc)},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
         return 2
 
 
