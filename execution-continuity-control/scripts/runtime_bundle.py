@@ -1,35 +1,509 @@
 #!/usr/bin/env python3
-"""Execution Continuity Control executable runtime-bundle template.
+"""Plain-text Execution Continuity Control lease controller.
 
-This file is the single canonical model-facing template. Bootstrap replaces the
-one PAYLOAD_B64 sentinel below with the turn's base64-encoded runtime manifest.
-The executable core is stored as a deterministic gzip/base64 payload so the
-canonical template remains self-contained; it is expanded in memory and run
-with this timestamped bundle pathname as __file__.
+This source is combined at build time with the recorder, action questioner, and
+end-turn router into one generated ``bundle.py``. The generated bundle invokes
+those procedures through ordinary in-process Python function calls. There is no
+runtime source decoding, compression, ``exec()``, or ``compile()``.
+
+The generated bundle is the sole Orchestrator. The model acts only under the
+current bundle-issued payload. Every emitted control payload carries the
+behavioral instructions applicable to the model at that point in execution.
 """
 from __future__ import annotations
 
-import base64
-import gzip
-import hashlib
+import argparse
+import json
+import os
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
-PAYLOAD_B64 = "__EXECUTION_CONTINUITY_BUNDLE_PAYLOAD_B64__"
-_SENTINEL = "__EXECUTION_" + "CONTINUITY_BUNDLE_PAYLOAD_B64__"
-_CORE_SHA256 = "af3c042d6c51e9ac2514755cf31c57305fc2efc7d02fe94963f7c5d134cfa36c"
-_CORE_GZIP_B64 = "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)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"
+# ``call_procedure(target, argv)`` is supplied by the generated bundle before
+# this controller source is evaluated. target is recorder, questioner, or router.
+
+CONTROL_VERSION = 1
+DEFAULT_CONTROL_STATE = Path("/mnt/data/execution-continuity-control-control-state.json")
+DEFAULT_OUTPUT_DIR = Path("/mnt/data/execution-continuity-control-records")
+DEFAULT_STATE_DIR = Path("/mnt/data/execution-continuity-control-protocol-state")
+
+FINAL_NARRATIVE_HEURISTIC = (
+    "Map the captured user prompt to the newest execution-record evidence. "
+    "Treat current-turn actions as primary evidence and earlier actions only as "
+    "relevant prior state, dependencies, or constraints. Prefer newer supported "
+    "state over stale conflicts. Do not turn plans, intentions, questionnaire "
+    "self-report, or unsupported claims into accomplishments. State meaningful "
+    "remaining gaps or impasse causes. Compress low-level continuity bookkeeping. "
+    "Expose user-relevant deliverables when appropriate and suppress internal "
+    "continuity artifacts unless requested or necessary as evidence."
+)
+
+BEHAVIORAL_INSTRUCTIONS = [
+    "The generated bundle is the sole Orchestrator. Act as the Worker only under the current payload.",
+    "NO CURRENT PAYLOAD = NO EXECUTION AUTHORITY.",
+    "Obey only the authority carried by the current unconsumed lease; never infer permission to perform another material action.",
+    "TASK_ACTION authorizes exactly one material task action. After it completes or fails, invoke this same bundle with after-action and the matching action_id before any further material task action.",
+    "CONTINUITY_RESPONSE authorizes only an answer to the supplied recorder/questioner/router protocol question. It authorizes no substantive task work.",
+    "FINAL_RESPONSE authorizes only construction and delivery of the final user-facing response from the supplied terminal context. It authorizes no remediation or additional task execution.",
+    "Planning, status reporting, procedural compliance, or statements of intention do not substitute for requested execution when execution is available.",
+    "Use observable execution evidence for claims about completion, mutation, persistence, retrieval, validation, or failure.",
+    "Treat every proposed stop or completion as a material action that must pass through after-action, questionnaire, and router processing.",
+    "A router CONTINUE directive must be executed through the next TASK_ACTION lease; do not end the user-facing turn instead.",
+    "Do not ask for permission already granted by the user's request unless a higher-priority rule actually requires new authorization.",
+    "Do not promise uninvoked background or future execution. Perform currently executable work in the current turn.",
+]
 
 
-def _runtime_source() -> str:
-    raw = gzip.decompress(base64.b64decode(_CORE_GZIP_B64.encode("ascii"), validate=True))
-    if hashlib.sha256(raw).hexdigest() != _CORE_SHA256:
-        raise RuntimeError("embedded runtime core SHA-256 mismatch")
-    source = raw.decode("utf-8")
-    if source.count(_SENTINEL) != 1:
-        raise RuntimeError("embedded runtime core must contain exactly one payload sentinel")
-    return source.replace(_SENTINEL, PAYLOAD_B64, 1)
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def read_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def count_record_actions(path_text: str | None) -> int:
+    if not path_text:
+        return 0
+    path = Path(path_text)
+    if not path.exists():
+        return 0
+    try:
+        value = read_json(path)
+    except Exception:
+        return 0
+    actions = value.get("actions") if isinstance(value, dict) else None
+    return len(actions) if isinstance(actions, list) else 0
+
+
+def initial_state() -> dict[str, Any]:
+    return {
+        "control_version": CONTROL_VERSION,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "phase": "awaiting_user_prompt",
+        "user_prompt": None,
+        "lease_sequence": 0,
+        "current_lease": None,
+        "record_config": None,
+        "current_record": None,
+        "current_record_name": None,
+        "current_record_id": None,
+        "questioner_state": None,
+        "turn_start_action_count": 0,
+        "terminal_directive": None,
+    }
+
+
+def load_state(path: Path, create: bool = False) -> dict[str, Any]:
+    if not path.exists():
+        if not create:
+            raise ValueError("control state does not exist; invoke bootstrap first")
+        state = initial_state()
+        write_json(path, state)
+        return state
+    state = read_json(path)
+    if not isinstance(state, dict) or state.get("control_version") != CONTROL_VERSION:
+        raise ValueError("control state is malformed or has an unsupported version")
+    return state
+
+
+def save_state(path: Path, state: dict[str, Any]) -> None:
+    state["updated_at"] = now_iso()
+    write_json(path, state)
+
+
+def base_payload(status: str, execution_authority: bool, **extra: Any) -> dict[str, Any]:
+    return {
+        "status": status,
+        "execution_authority": execution_authority,
+        "behavioral_instructions": BEHAVIORAL_INSTRUCTIONS,
+        **extra,
+    }
+
+
+def emit(payload: dict[str, Any]) -> int:
+    print(json.dumps(payload, ensure_ascii=False))
+    return 0
+
+
+def control_error(detail: str, code: str = "CONTROL_ERROR") -> int:
+    return emit(base_payload(code, False, detail=detail))
+
+
+def lease_payload(state: dict[str, Any]) -> dict[str, Any]:
+    lease = state.get("current_lease")
+    if not isinstance(lease, dict):
+        raise ValueError("no current lease exists")
+    authority = lease["authority"]
+    return base_payload(
+        "WORKER_PAYLOAD",
+        authority == "TASK_ACTION",
+        lease=lease,
+        user_prompt=state.get("user_prompt"),
+    )
+
+
+def issue_lease(
+    state_path: Path,
+    state: dict[str, Any],
+    authority: str,
+    next_instruction: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if state.get("current_lease") is not None:
+        raise ValueError("cannot issue a second lease while another lease is outstanding")
+    state["lease_sequence"] += 1
+    lease = {
+        "sequence": state["lease_sequence"],
+        "action_id": uuid.uuid4().hex,
+        "authority": authority,
+        "issued_at": now_iso(),
+        "next_instruction": next_instruction,
+        "context": context or {},
+        "return_contract": (
+            "After exactly one material task action invoke after-action with this action_id."
+            if authority == "TASK_ACTION"
+            else "Return only the requested protocol answer through continuity-answer with this action_id."
+            if authority == "CONTINUITY_RESPONSE"
+            else "Construct and deliver only the final user-facing response. Do not perform more task work."
+        ),
+    }
+    state["current_lease"] = lease
+    state["phase"] = {
+        "TASK_ACTION": "task_action",
+        "CONTINUITY_RESPONSE": "continuity_response",
+        "FINAL_RESPONSE": "final",
+    }[authority]
+    save_state(state_path, state)
+    return lease_payload(state)
+
+
+def consume_lease(state_path: Path, state: dict[str, Any], action_id: str, authority: str) -> dict[str, Any]:
+    lease = state.get("current_lease")
+    if not isinstance(lease, dict):
+        raise ValueError("there is no outstanding lease")
+    if lease.get("action_id") != action_id:
+        raise ValueError("action_id does not match the current lease")
+    if lease.get("authority") != authority:
+        raise ValueError(f"current lease authority is {lease.get('authority')}, not {authority}")
+    state["current_lease"] = None
+    save_state(state_path, state)
+    return lease
+
+
+def update_record_from_receipt(state: dict[str, Any], receipt: Any) -> None:
+    if not isinstance(receipt, dict):
+        return
+    record = receipt.get("record")
+    record_name = receipt.get("record_filename")
+    record_id = receipt.get("record_id")
+    if isinstance(record, str):
+        state["current_record"] = record
+    if isinstance(record_name, str):
+        state["current_record_name"] = record_name
+    if isinstance(record_id, str):
+        state["current_record_id"] = record_id
+    config = state.get("record_config")
+    if isinstance(config, dict):
+        if isinstance(record, str):
+            config["record"] = record
+        if isinstance(record_name, str):
+            config["record_name"] = record_name
+        if isinstance(record_id, str):
+            config["record_id"] = record_id
+
+
+def configure_recording(state: dict[str, Any], args: argparse.Namespace) -> None:
+    if state.get("record_config") is not None:
+        return
+    output_dir = args.output_dir or str(DEFAULT_OUTPUT_DIR)
+    state_dir = args.state_dir or str(DEFAULT_STATE_DIR)
+    record_id = args.record_id
+    if not record_id:
+        raise ValueError("first after-action requires --record-id")
+    if bool(args.record) != bool(args.record_name):
+        raise ValueError("--record and --record-name must be supplied together")
+    state["turn_start_action_count"] = count_record_actions(args.record)
+    state["record_config"] = {
+        "output_dir": output_dir,
+        "state_dir": state_dir,
+        "record_id": record_id,
+        "record": args.record,
+        "record_name": args.record_name,
+        "chat_id": args.chat_id,
+        "chat_title": args.chat_title,
+    }
+
+
+def recorder_invoke_argv(state: dict[str, Any]) -> list[str]:
+    config = state["record_config"]
+    argv = [
+        "invoke",
+        "--output-dir", config["output_dir"],
+        "--scope", "worker",
+        "--state-dir", config["state_dir"],
+        "--questioner", "action_questioner.py",
+        "--router", "end_turn_router.py",
+        "--record-id", config["record_id"],
+    ]
+    if config.get("record"):
+        argv += ["--record", config["record"], "--record-name", config["record_name"]]
+    if config.get("chat_id") is not None:
+        argv += ["--chat-id", config["chat_id"]]
+    if config.get("chat_title") is not None:
+        argv += ["--chat-title", config["chat_title"]]
+    return argv
+
+
+def make_continuity_context(questioner_output: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "protocol": questioner_output,
+        "instruction": "Answer only the supplied protocol question using observable execution state and return that answer through continuity-answer.",
+    }
+
+
+def terminal_context(state: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    record_path = state.get("current_record")
+    record_content = None
+    total_actions = 0
+    if isinstance(record_path, str) and Path(record_path).exists():
+        try:
+            record_content = read_json(Path(record_path))
+            actions = record_content.get("actions") if isinstance(record_content, dict) else None
+            total_actions = len(actions) if isinstance(actions, list) else 0
+        except Exception:
+            record_content = None
+    start = int(state.get("turn_start_action_count") or 0) + 1
+    return {
+        "terminal_directive": state.get("terminal_directive"),
+        "terminal_result": result,
+        "execution_record_path": record_path,
+        "execution_record_filename": state.get("current_record_name"),
+        "record_id": state.get("current_record_id"),
+        "execution_record": record_content,
+        "current_turn_action_range": {
+            "start_sequence": start,
+            "end_sequence": total_actions,
+        },
+        "final_narrative_heuristic": FINAL_NARRATIVE_HEURISTIC,
+        "file_exposure_guidance": (
+            "Expose user-created or user-relevant deliverables when appropriate. "
+            "Do not expose internal continuity state, questionnaires, router state, or execution records by default."
+        ),
+    }
+
+
+def cmd_bootstrap(args: argparse.Namespace) -> int:
+    state_path = Path(args.control_state)
+    if state_path.exists():
+        state = load_state(state_path)
+        if state.get("phase") == "final":
+            state = initial_state()
+            write_json(state_path, state)
+        elif state.get("current_lease") is not None:
+            return emit(lease_payload(state))
+    else:
+        state = initial_state()
+        write_json(state_path, state)
+
+    if state.get("phase") != "awaiting_user_prompt":
+        return control_error(f"bootstrap cannot resume phase {state.get('phase')!r} without an outstanding lease")
+    return emit(base_payload(
+        "REQUEST_USER_PROMPT",
+        False,
+        request="Supply the complete current user prompt unchanged.",
+        next_command=f"provide-prompt --control-state {state_path} --user-prompt <complete user prompt>",
+    ))
+
+
+def cmd_provide_prompt(args: argparse.Namespace) -> int:
+    state_path = Path(args.control_state)
+    state = load_state(state_path)
+    if state.get("phase") != "awaiting_user_prompt" or state.get("current_lease") is not None:
+        return control_error("provide-prompt is legal only while awaiting the initial user prompt")
+    if not args.user_prompt:
+        return control_error("user prompt must not be empty")
+    state["user_prompt"] = args.user_prompt
+    payload = issue_lease(
+        state_path,
+        state,
+        "TASK_ACTION",
+        "Perform exactly one next material action toward the captured user prompt. After that action completes or fails, invoke after-action with this lease's action_id before any further material task action.",
+    )
+    return emit(payload)
+
+
+def cmd_after_action(args: argparse.Namespace) -> int:
+    state_path = Path(args.control_state)
+    state = load_state(state_path)
+    try:
+        consume_lease(state_path, state, args.action_id, "TASK_ACTION")
+        configure_recording(state, args)
+        save_state(state_path, state)
+        result = call_procedure("recorder", recorder_invoke_argv(state))
+        if result.get("status") != "QUESTIONER_STARTED":
+            raise RuntimeError(f"recorder returned unexpected result: {result!r}")
+        update_record_from_receipt(state, result.get("invocation"))
+        questioner = result.get("questioner")
+        if not isinstance(questioner, dict) or questioner.get("status") != "QUESTION":
+            raise RuntimeError(f"questioner did not return its first question: {questioner!r}")
+        state["questioner_state"] = questioner.get("state")
+        save_state(state_path, state)
+        payload = issue_lease(
+            state_path,
+            state,
+            "CONTINUITY_RESPONSE",
+            "Answer only the supplied continuity protocol question, then return the answer with continuity-answer and this lease's action_id.",
+            make_continuity_context(questioner),
+        )
+        return emit(payload)
+    except Exception as exc:
+        save_state(state_path, state)
+        return control_error(str(exc), type(exc).__name__)
+
+
+def cmd_continuity_answer(args: argparse.Namespace) -> int:
+    state_path = Path(args.control_state)
+    state = load_state(state_path)
+    try:
+        consume_lease(state_path, state, args.action_id, "CONTINUITY_RESPONSE")
+        questioner_state = state.get("questioner_state")
+        if not isinstance(questioner_state, str) or not questioner_state:
+            raise ValueError("questioner state is unavailable")
+        result = call_procedure("questioner", ["answer", "--state", questioner_state, "--answer", args.answer])
+
+        if result.get("status") == "QUESTION":
+            if isinstance(result.get("record"), dict):
+                update_record_from_receipt(state, result["record"])
+            save_state(state_path, state)
+            payload = issue_lease(
+                state_path,
+                state,
+                "CONTINUITY_RESPONSE",
+                "Answer only the supplied continuity protocol question, then return the answer with continuity-answer and this lease's action_id.",
+                make_continuity_context(result),
+            )
+            return emit(payload)
+
+        if result.get("status") == "QUESTIONER_ACTION_OVER":
+            update_record_from_receipt(state, result.get("record"))
+            state["questioner_state"] = None
+            save_state(state_path, state)
+            payload = issue_lease(
+                state_path,
+                state,
+                "TASK_ACTION",
+                "The prior material action was not an end-of-turn attempt. Perform exactly one next material action toward the captured user prompt, then invoke after-action with this lease's action_id.",
+                {"questionnaire_result": result},
+            )
+            return emit(payload)
+
+        if result.get("status") == "DIRECTIVE":
+            update_record_from_receipt(state, result.get("record"))
+            state["questioner_state"] = None
+            directive = result.get("directive")
+            state["terminal_directive"] = directive
+            save_state(state_path, state)
+
+            if directive == "CONTINUE":
+                instruction = result.get("instruction") or "Continue execution toward the requested result."
+                payload = issue_lease(
+                    state_path,
+                    state,
+                    "TASK_ACTION",
+                    instruction,
+                    {"router_result": result},
+                )
+                return emit(payload)
+
+            if directive in {"COMPLETE", "IMPASSE"}:
+                payload = issue_lease(
+                    state_path,
+                    state,
+                    "FINAL_RESPONSE",
+                    (
+                        "Construct and deliver the final response from the supplied terminal context. Do not perform additional remediation or task execution."
+                    ),
+                    terminal_context(state, result),
+                )
+                return emit(payload)
+
+            raise RuntimeError(f"unsupported router directive: {directive!r}")
+
+        raise RuntimeError(f"questioner returned unexpected result: {result!r}")
+    except Exception as exc:
+        save_state(state_path, state)
+        return control_error(str(exc), type(exc).__name__)
+
+
+def cmd_self_test(args: argparse.Namespace) -> int:
+    required = {"recorder", "questioner", "router"}
+    registered = set(globals().get("BUNDLE_PROCEDURE_NAMES", []))
+    if registered != required:
+        print(json.dumps({"status": "SELF_TEST_FAIL", "detail": f"procedure registry mismatch: {sorted(registered)!r}"}))
+        return 2
+    if any(token in Path(__file__).read_text(encoding="utf-8") for token in ("_CORE_GZIP_B64", "PAYLOAD_B64", "base64.b64decode", "gzip.decompress")):
+        print(json.dumps({"status": "SELF_TEST_FAIL", "detail": "forbidden encoding machinery present"}))
+        return 2
+    print(json.dumps({"status": "SELF_TEST_PASS", "procedures": sorted(required)}, ensure_ascii=False))
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description="Execution Continuity Control single-file runtime")
+    ap.add_argument("--self-test", action="store_true")
+    sub = ap.add_subparsers(dest="command")
+
+    bootstrap = sub.add_parser("bootstrap")
+    bootstrap.add_argument("--control-state", default=str(DEFAULT_CONTROL_STATE))
+    bootstrap.set_defaults(fn=cmd_bootstrap)
+
+    prompt = sub.add_parser("provide-prompt")
+    prompt.add_argument("--control-state", default=str(DEFAULT_CONTROL_STATE))
+    prompt.add_argument("--user-prompt", required=True)
+    prompt.set_defaults(fn=cmd_provide_prompt)
+
+    after = sub.add_parser("after-action")
+    after.add_argument("--control-state", default=str(DEFAULT_CONTROL_STATE))
+    after.add_argument("--action-id", required=True)
+    after.add_argument("--output-dir")
+    after.add_argument("--state-dir")
+    after.add_argument("--record-id")
+    after.add_argument("--record")
+    after.add_argument("--record-name")
+    after.add_argument("--chat-id")
+    after.add_argument("--chat-title")
+    after.set_defaults(fn=cmd_after_action)
+
+    answer = sub.add_parser("continuity-answer")
+    answer.add_argument("--control-state", default=str(DEFAULT_CONTROL_STATE))
+    answer.add_argument("--action-id", required=True)
+    answer.add_argument("--answer", required=True)
+    answer.set_defaults(fn=cmd_continuity_answer)
+    return ap
+
+
+def main() -> int:
+    ap = build_parser()
+    args = ap.parse_args()
+    if args.self_test:
+        return cmd_self_test(args)
+    if not getattr(args, "command", None):
+        ap.error("a command is required unless --self-test is used")
+    try:
+        return args.fn(args)
+    except Exception as exc:
+        return control_error(str(exc), type(exc).__name__)
 
 
 if __name__ == "__main__":
-    source = _runtime_source()
-    namespace = {"__name__": "__main__", "__file__": __file__, "__package__": None}
-    exec(compile(source, __file__, "exec"), namespace, namespace)
+    raise SystemExit(main())
