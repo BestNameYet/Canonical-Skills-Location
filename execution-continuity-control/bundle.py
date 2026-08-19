@@ -15,7 +15,7 @@ from typing import Any
 CONTROL_VERSION = 4
 PAYLOAD_SCHEMA = "execution-continuity-payload-v4"
 INITIALIZATION_SCHEMA = "execution-continuity-initialization-v1"
-PREPROCESSOR_PROTOCOL = "prompt-preprocessor-v1"
+PREPROCESSOR_PROTOCOL = "prompt-preprocessor-v2"
 RECORD_PREFIX = "execution-record_"
 RECORD_SUFFIX = ".json"
 STAMP_RE = re.compile(r"^execution-record_(\d{8}T\d{12}Z)\.json$")
@@ -497,271 +497,670 @@ def run_router()->dict[str,Any]:
 
 # --- prompt preprocessor --------------------------------------------------
 
-PREPROCESSOR_GOVERNING_KINDS = {
-    "CONSTRAINT":"Limits how one or more actions may be performed.",
-    "PROHIBITION":"States something that must not occur or must not be included.",
-    "PERMISSION":"States an action or method that the user explicitly permits.",
-    "SOURCE_RESTRICTION":"Limits information acquisition to specified sources or source classes.",
-    "TEMPORAL_RESTRICTION":"Limits execution or source selection by time or recency.",
-    "LOCATION_RESTRICTION":"Limits execution or selection by place, environment, or storage location.",
-    "FORMAT_REQUIREMENT":"Requires a particular representation or output format.",
-    "QUALITY_REQUIREMENT":"Requires a stated quality, validation, or evidence threshold.",
-    "ORDERING_REQUIREMENT":"Requires an explicit sequence among otherwise identified actions.",
+# The preprocessor is a source-preserving semantic editor.  It never rebuilds
+# task_prompt from an execution plan.  The semantic engine maps the source,
+# marks preservation-sensitive meaning, proposes bounded source-relative edits,
+# then independently remaps the candidate.  Only after equivalence is accepted
+# is a separate execution plan derived for first-command selection.
+
+PREPROCESSOR_SEMANTIC_KINDS = {
+    "GOAL":"A terminal result or state requested by the user.",
+    "ACTION":"An action the user explicitly requests as part of the task.",
+    "OBJECT":"A subject, target, artifact, entity, or other object of meaning.",
+    "REFERENT":"A referring expression whose identity or attachment matters.",
+    "MODIFIER":"A quantity, scope, criterion, cardinality, degree, or other modifier.",
+    "CONSTRAINT":"A restriction on what may or must occur.",
+    "DELIVERABLE":"Something the user expects to receive, observe, or have changed.",
+    "CONDITION":"A condition, exception, branch trigger, or contingency.",
+    "RELATIONAL_TERM":"A source expression that establishes a semantic relationship such as comparison, inclusion, ordering, or dependency.",
+    "CONTROL_DIRECTIVE":"A user-supplied directive about how the task-handling process itself should operate.",
 }
-PREPROCESSOR_MODIFIER_KINDS = {
-    "QUANTITY":"Specifies how many or how much.",
-    "SCOPE":"Limits or expands the set to which a requirement applies.",
-    "CRITERION":"Provides a property used to compare, select, validate, classify, or score.",
-    "ORDER":"Specifies required relative ordering.",
-    "PRIORITY":"Specifies preference among actions or results.",
-    "RECENCY":"Specifies temporal freshness such as latest or recent.",
-    "COMPLETENESS":"Specifies all, every, complete, exhaustive, or analogous coverage.",
-    "EXCLUSIVITY":"Specifies only, exactly, exclusively, or analogous exclusion of alternatives.",
+PREPROCESSOR_RELATION_KINDS = {
+    "SUBJECT_OF":"One semantic item is the subject of another.",
+    "OBJECT_OF":"One semantic item is the object or target of another.",
+    "MODIFIES":"One semantic item modifies the interpretation of another.",
+    "GOVERNS":"One semantic item constrains or governs another.",
+    "REFERS_TO":"A referent identifies another semantic item.",
+    "COMPARES_WITH":"Two items are explicitly compared or contrasted.",
+    "MEMBER_OF_SET":"An item belongs to an expressed list, set, or comparison dimension.",
+    "CONJUNCT_WITH":"Items are jointly required or coordinated.",
+    "ALTERNATIVE_TO":"Items are represented as alternatives.",
+    "CONDITION_FOR":"One item supplies a condition for another.",
+    "OUTPUT_OF":"A deliverable or result is the output of an expressed action.",
+    "SEQUENCED_WITH":"The source explicitly represents relative order.",
+    "SCOPE_OVER":"One item defines the semantic scope of another.",
 }
-PREPROCESSOR_DELIVERABLE_KINDS = {
-    "ANSWER":"A user-facing answer or determination.",
-    "ARTIFACT":"A newly produced file or other persistent object.",
-    "MODIFICATION":"A requested change to existing state or an existing artifact.",
-    "CALCULATION":"A computed user-facing value or result.",
-    "COMPARISON":"A user-facing comparison of identified subjects.",
-    "RECOMMENDATION":"A user-facing selection or recommendation.",
-    "RETRIEVED_OBJECT":"A retrieved object or usable reference requested for delivery.",
-    "REPORT":"A structured or narrative report of findings.",
-    "CONFIRMATION":"A user-facing confirmation that an operation or state was established.",
+PREPROCESSOR_FEATURES = {
+    "CARDINALITY":"Singular/plural or an exact/relative count carried by the source.",
+    "QUANTITY":"A numeric or amount constraint.",
+    "MODALITY":"Required, permitted, optional, hypothetical, or conditional force.",
+    "POLARITY":"Positive or negative semantic force.",
+    "SCOPE":"The set or proposition over which an expression operates.",
+    "REFERENT":"The identity to which a phrase refers.",
+    "CONDITION":"The condition under which a proposition applies.",
+    "COMPARISON_SET":"The subjects or dimensions participating in comparison.",
+    "ORDER":"Required relative ordering.",
+    "TEMPORAL":"Time or recency semantics.",
+    "EXCLUSIVITY":"Only/exactly/exclusively semantics.",
+    "COMPLETENESS":"All/every/complete/exhaustive semantics.",
+    "DEGREE":"Strength or intensity expressed by the source.",
+    "LEXICAL_LITERAL":"An exact lexical form that must remain verbatim.",
 }
+PREPROCESSOR_ATTENTION_LEVELS = {
+    "CRITICAL":"Loss or alteration would materially change the requested task.",
+    "HIGH":"Important semantic content whose alteration is likely to change interpretation.",
+    "MEDIUM":"Meaningful content that can be rephrased with ordinary care.",
+    "LOW":"Low-risk connective or stylistic material.",
+}
+PREPROCESSOR_REWRITE_CLASSES = {
+    "LOCKED":"The anchored wording must remain verbatim inside any edit touching it.",
+    "SEMANTICALLY_LOCKED":"Wording may change but all mapped semantics and protected features must remain equivalent.",
+    "STRUCTURALLY_MOVABLE":"The clause or phrase may move when its semantic attachments remain unchanged.",
+    "COMPRESSIBLE":"The expression may be shortened only if all mapped meaning survives.",
+    "EXPANDABLE":"The expression may be clarified only with information semantically entailed by the source.",
+    "STYLE_FREE":"Stylistic form may change so long as no mapped relationship is altered.",
+}
+PREPROCESSOR_EDIT_PURPOSES = {
+    "GRAMMAR_NORMALIZATION":"Correct grammar, spelling, punctuation, or surface form.",
+    "CLARIFY_ATTACHMENT":"Make an already represented modifier, referent, or relation attachment clearer.",
+    "REDUCE_SYNTACTIC_COMPLEXITY":"Simplify syntax without changing represented meaning.",
+    "STRUCTURE_SEPARATION":"Separate already represented instructions or clauses for readability.",
+    "DISAMBIGUATE_EXISTING_MEANING":"Make one source-supported interpretation explicit when the source itself already determines it.",
+}
+PREPROCESSOR_AUDIT_RESULTS = {"EQUIVALENT","CHANGED","OMITTED"}
+PREPROCESSOR_EXEC_DEPENDENCIES = {"REQUIRES_OUTPUT","REQUIRES_COMPLETION"}
+
 
 def _enum_descriptions(mapping:dict[str,str])->str:
     return " | ".join(f"{key} — {description}" for key,description in mapping.items())
 
+
 def _require_exact_keys(value:Any,expected:set[str],name:str)->dict[str,Any]:
-    if not isinstance(value,dict) or set(value)!=expected: raise ValueError(f"{name} must contain exactly {sorted(expected)}")
+    if not isinstance(value,dict) or set(value)!=expected:
+        raise ValueError(f"{name} must contain exactly {sorted(expected)}")
     return value
+
 
 def _string_array(value:Any,name:str,allow_empty:bool=True)->list[str]:
-    if not isinstance(value,list) or (not allow_empty and not value): raise ValueError(f"{name} must be an array{' with at least one item' if not allow_empty else ''}")
-    for item in value: require_text(item,name)
+    if not isinstance(value,list) or (not allow_empty and not value):
+        raise ValueError(f"{name} must be an array{' with at least one item' if not allow_empty else ''}")
+    for item in value:
+        require_text(item,name)
     return value
 
-def _supporting_text(value:Any,name:str,original_prompt:str,allow_empty:bool=False)->list[str]:
-    items=_string_array(value,name,allow_empty=allow_empty)
-    for item in items:
-        if item not in original_prompt: raise ValueError(f"{name} contains text not copied exactly from original_user_prompt")
-    return items
 
 def _numbered_objects(value:Any,prefix:str,name:str,keys:set[str],allow_empty:bool=True)->list[dict[str,Any]]:
-    if not isinstance(value,list) or (not allow_empty and not value): raise ValueError(f"{name} must be an array{' with at least one item' if not allow_empty else ''}")
+    if not isinstance(value,list) or (not allow_empty and not value):
+        raise ValueError(f"{name} must be an array{' with at least one item' if not allow_empty else ''}")
     for index,item in enumerate(value,1):
         _require_exact_keys(item,keys,f"{name}[{index}]")
-        if item["id"]!=f"{prefix}{index}": raise ValueError(f"{name} IDs must be {prefix}1, {prefix}2, ... in order")
+        if item["id"]!=f"{prefix}{index}":
+            raise ValueError(f"{name} IDs must be {prefix}1, {prefix}2, ... in order")
     return value
 
+
 def _semantic_question(question_id:str,semantic_function:str,instruction:str,inputs:dict[str,Any],response_schema:dict[str,Any],constraints:list[str],validator)->Any:
-    prompt={"protocol":PREPROCESSOR_PROTOCOL,"question_id":question_id,"semantic_function":semantic_function,"instruction":instruction,"inputs":inputs,"response_schema":response_schema,"constraints":constraints}
+    prompt={
+        "protocol":PREPROCESSOR_PROTOCOL,
+        "question_id":question_id,
+        "semantic_function":semantic_function,
+        "instruction":instruction,
+        "inputs":inputs,
+        "response_schema":response_schema,
+        "constraints":constraints,
+    }
     while True:
         print(json.dumps(prompt,ensure_ascii=False),flush=True)
         line=sys.stdin.readline()
-        if line=="": raise EOFError(f"EOF waiting for {question_id}")
-        try: value=json.loads(line)
+        if line=="":
+            raise EOFError(f"EOF waiting for {question_id}")
+        try:
+            value=json.loads(line)
         except json.JSONDecodeError as exc:
-            prompt={**prompt,"validation_error":f"Response must be one JSON value: {exc}"}; continue
+            prompt={**prompt,"validation_error":f"Response must be one JSON value: {exc}"}
+            continue
         try:
             validator(value)
             return value
         except Exception as exc:
             prompt={**prompt,"validation_error":str(exc)}
 
+
+def _source_anchor(text:str,source_text:Any,occurrence:Any,name:str)->tuple[int,int]:
+    source=require_text(source_text,f"{name}.source_text")
+    if not isinstance(occurrence,int) or isinstance(occurrence,bool) or occurrence<1:
+        raise ValueError(f"{name}.occurrence must be a positive integer")
+    start=-1
+    cursor=0
+    for _ in range(occurrence):
+        start=text.find(source,cursor)
+        if start<0:
+            raise ValueError(f"{name} anchor occurrence does not exist in source text")
+        cursor=start+1
+    return start,start+len(source)
+
+
+def _validate_context_map(value:Any,text:str,name:str)->dict[str,Any]:
+    _require_exact_keys(value,{"semantic_items","relations","ambiguities"},name)
+
+    items=_numbered_objects(
+        value["semantic_items"],"S",f"{name}.semantic_items",
+        {"id","kind","meaning","source_text","occurrence","features"},
+        allow_empty=False,
+    )
+    item_ids=set()
+    for item in items:
+        if item["kind"] not in PREPROCESSOR_SEMANTIC_KINDS:
+            raise ValueError(f"{name} semantic item kind invalid")
+        require_text(item["meaning"],f"{name} semantic item meaning")
+        _source_anchor(text,item["source_text"],item["occurrence"],f"{name}.{item['id']}")
+        if not isinstance(item["features"],dict):
+            raise ValueError(f"{name}.{item['id']}.features must be an object")
+        for feature,feature_value in item["features"].items():
+            if feature not in PREPROCESSOR_FEATURES:
+                raise ValueError(f"{name}.{item['id']} feature {feature} is not allowed")
+            require_text(str(feature_value),f"{name}.{item['id']}.features.{feature}")
+        item_ids.add(item["id"])
+
+    relations=_numbered_objects(
+        value["relations"],"R",f"{name}.relations",
+        {"id","kind","from_id","to_id","meaning","source_text","occurrence"},
+        allow_empty=True,
+    )
+    for relation in relations:
+        if relation["kind"] not in PREPROCESSOR_RELATION_KINDS:
+            raise ValueError(f"{name} relation kind invalid")
+        if relation["from_id"] not in item_ids or relation["to_id"] not in item_ids:
+            raise ValueError(f"{name} relation references unknown semantic item")
+        require_text(relation["meaning"],f"{name} relation meaning")
+        _source_anchor(text,relation["source_text"],relation["occurrence"],f"{name}.{relation['id']}")
+
+    ambiguities=_numbered_objects(
+        value["ambiguities"],"U",f"{name}.ambiguities",
+        {"id","subject","interpretations","material","source_text","occurrence"},
+        allow_empty=True,
+    )
+    for ambiguity in ambiguities:
+        require_text(ambiguity["subject"],f"{name} ambiguity subject")
+        interpretations=_string_array(ambiguity["interpretations"],f"{name} ambiguity interpretations",allow_empty=False)
+        if len(interpretations)<2:
+            raise ValueError(f"{name} ambiguity must contain at least two interpretations")
+        if not isinstance(ambiguity["material"],bool):
+            raise ValueError(f"{name} ambiguity material must be boolean")
+        _source_anchor(text,ambiguity["source_text"],ambiguity["occurrence"],f"{name}.{ambiguity['id']}")
+    return value
+
+
+def _context_map(text:str,question_id:str,semantic_function:str)->dict[str,Any]:
+    def validate(v):
+        _validate_context_map(v,text,question_id)
+    return _semantic_question(
+        question_id,
+        semantic_function,
+        "Create a source-anchored semantic context map of prompt_text. Map only meaning explicitly expressed or necessarily represented by the text; do not infer an execution strategy, preferred method, extra quality criterion, extra deliverable, or prudent constraint. Every semantic item and relation must be anchored to an exact substring plus its 1-based occurrence. Record preservation-sensitive features only when the source actually carries them. Report material ambiguity without resolving it.",
+        {"prompt_text":text},
+        {
+            "semantic_items":[{
+                "id":"S#",
+                "kind":"SEMANTIC_KIND",
+                "meaning":"string",
+                "source_text":"exact substring",
+                "occurrence":1,
+                "features":{"FEATURE":"source-preserved value"},
+            }],
+            "relations":[{
+                "id":"R#",
+                "kind":"RELATION_KIND",
+                "from_id":"S#",
+                "to_id":"S#",
+                "meaning":"string",
+                "source_text":"exact substring",
+                "occurrence":1,
+            }],
+            "ambiguities":[{
+                "id":"U#",
+                "subject":"string",
+                "interpretations":["string","string"],
+                "material":False,
+                "source_text":"exact substring",
+                "occurrence":1,
+            }],
+        },
+        [
+            "Semantic item kinds: "+_enum_descriptions(PREPROCESSOR_SEMANTIC_KINDS),
+            "Relation kinds: "+_enum_descriptions(PREPROCESSOR_RELATION_KINDS),
+            "Feature names: "+_enum_descriptions(PREPROCESSOR_FEATURES),
+            "Do not execute the user task.",
+            "Do not normalize singular to plural, weaken or strengthen modality, broaden scope, change referents, or turn an execution strategy into user semantics.",
+        ],
+        validate,
+    )
+
+
+def _attention_map(original_prompt:str,context_map:dict[str,Any])->dict[str,Any]:
+    item_ids=[item["id"] for item in context_map["semantic_items"]]
+    relation_ids=[item["id"] for item in context_map["relations"]]
+    feature_names=set(PREPROCESSOR_FEATURES)
+
+    def validate(v):
+        _require_exact_keys(v,{"item_attention","relation_attention"},"PP2")
+        items=v["item_attention"]
+        if not isinstance(items,list) or len(items)!=len(item_ids):
+            raise ValueError("PP2.item_attention must contain exactly one entry per semantic item")
+        if {x.get("semantic_item_id") for x in items if isinstance(x,dict)}!=set(item_ids):
+            raise ValueError("PP2.item_attention must cover every semantic item exactly once")
+        seen=set()
+        for entry in items:
+            _require_exact_keys(entry,{"semantic_item_id","attention","rewrite_class","protected_features","reason"},"PP2 item attention")
+            if entry["semantic_item_id"] in seen:
+                raise ValueError("PP2 duplicate semantic item")
+            seen.add(entry["semantic_item_id"])
+            if entry["attention"] not in PREPROCESSOR_ATTENTION_LEVELS:
+                raise ValueError("PP2 item attention level invalid")
+            if entry["rewrite_class"] not in PREPROCESSOR_REWRITE_CLASSES:
+                raise ValueError("PP2 rewrite class invalid")
+            protected=_string_array(entry["protected_features"],"PP2 protected_features")
+            if any(name not in feature_names for name in protected):
+                raise ValueError("PP2 protected feature invalid")
+            require_text(entry["reason"],"PP2 item attention reason")
+
+        rels=v["relation_attention"]
+        if not isinstance(rels,list) or len(rels)!=len(relation_ids):
+            raise ValueError("PP2.relation_attention must contain exactly one entry per relation")
+        if {x.get("relation_id") for x in rels if isinstance(x,dict)}!=set(relation_ids):
+            raise ValueError("PP2.relation_attention must cover every relation exactly once")
+        seen=set()
+        for entry in rels:
+            _require_exact_keys(entry,{"relation_id","attention","protected","reason"},"PP2 relation attention")
+            if entry["relation_id"] in seen:
+                raise ValueError("PP2 duplicate relation")
+            seen.add(entry["relation_id"])
+            if entry["attention"] not in PREPROCESSOR_ATTENTION_LEVELS:
+                raise ValueError("PP2 relation attention level invalid")
+            if not isinstance(entry["protected"],bool):
+                raise ValueError("PP2 relation protected must be boolean")
+            require_text(entry["reason"],"PP2 relation attention reason")
+
+    return _semantic_question(
+        "PP2",
+        "MAP_SEMANTIC_ATTENTION",
+        "Assign preservation attention to every semantic item and relation in context_map. Attention means semantic fragility, not importance for rewriting: higher attention must reduce rewrite freedom. Choose the most permissive rewrite class that is still safe. Mark the exact semantic features whose values must survive any rewrite.",
+        {"original_user_prompt":original_prompt,"context_map":context_map},
+        {
+            "item_attention":[{
+                "semantic_item_id":"S#",
+                "attention":"CRITICAL | HIGH | MEDIUM | LOW",
+                "rewrite_class":"LOCKED | SEMANTICALLY_LOCKED | STRUCTURALLY_MOVABLE | COMPRESSIBLE | EXPANDABLE | STYLE_FREE",
+                "protected_features":["FEATURE"],
+                "reason":"string",
+            }],
+            "relation_attention":[{
+                "relation_id":"R#",
+                "attention":"CRITICAL | HIGH | MEDIUM | LOW",
+                "protected":True,
+                "reason":"string",
+            }],
+        },
+        [
+            "Attention levels: "+_enum_descriptions(PREPROCESSOR_ATTENTION_LEVELS),
+            "Rewrite classes: "+_enum_descriptions(PREPROCESSOR_REWRITE_CLASSES),
+            "Protected feature names: "+_enum_descriptions(PREPROCESSOR_FEATURES),
+            "Do not propose edits in this step.",
+            "Protect semantic relationships as well as individual words or phrases.",
+        ],
+        validate,
+    )
+
+
+def _resolved_context_spans(text:str,context_map:dict[str,Any])->tuple[dict[str,tuple[int,int]],dict[str,tuple[int,int]]]:
+    item_spans={
+        item["id"]:_source_anchor(text,item["source_text"],item["occurrence"],item["id"])
+        for item in context_map["semantic_items"]
+    }
+    relation_spans={
+        relation["id"]:_source_anchor(text,relation["source_text"],relation["occurrence"],relation["id"])
+        for relation in context_map["relations"]
+    }
+    return item_spans,relation_spans
+
+
+def _propose_edits(original_prompt:str,context_map:dict[str,Any],attention_map:dict[str,Any])->list[dict[str,Any]]:
+    item_ids={item["id"] for item in context_map["semantic_items"]}
+    relation_ids={item["id"] for item in context_map["relations"]}
+    item_spans,relation_spans=_resolved_context_spans(original_prompt,context_map)
+    attention_by={item["semantic_item_id"]:item for item in attention_map["item_attention"]}
+
+    def validate(v):
+        _require_exact_keys(v,{"edits"},"PP3")
+        edits=_numbered_objects(
+            v["edits"],"E","PP3.edits",
+            {"id","source_text","occurrence","replacement","purpose","semantic_item_ids","relation_ids"},
+            allow_empty=True,
+        )
+        resolved=[]
+        for edit in edits:
+            span=_source_anchor(original_prompt,edit["source_text"],edit["occurrence"],f"PP3.{edit['id']}")
+            if not isinstance(edit["replacement"],str) or edit["replacement"]=="":
+                raise ValueError("PP3 replacement must be a non-empty string")
+            if edit["purpose"] not in PREPROCESSOR_EDIT_PURPOSES:
+                raise ValueError("PP3 edit purpose invalid")
+            declared_items=_string_array(edit["semantic_item_ids"],"PP3 semantic_item_ids")
+            declared_relations=_string_array(edit["relation_ids"],"PP3 relation_ids")
+            if any(x not in item_ids for x in declared_items):
+                raise ValueError("PP3 edit references unknown semantic item")
+            if any(x not in relation_ids for x in declared_relations):
+                raise ValueError("PP3 edit references unknown relation")
+            intersect_items={sid for sid,s in item_spans.items() if not (span[1]<=s[0] or span[0]>=s[1])}
+            intersect_relations={rid for rid,s in relation_spans.items() if not (span[1]<=s[0] or span[0]>=s[1])}
+            if not intersect_items.issubset(set(declared_items)):
+                raise ValueError("PP3 edit must declare every semantic item whose anchor it intersects")
+            if not intersect_relations.issubset(set(declared_relations)):
+                raise ValueError("PP3 edit must declare every semantic relation whose anchor it intersects")
+            for sid in intersect_items:
+                att=attention_by[sid]
+                if att["rewrite_class"]=="LOCKED" and edit["replacement"]!=edit["source_text"]:
+                    raise ValueError(f"PP3 edit may not alter any source span intersecting LOCKED semantic item {sid}")
+            resolved.append((span[0],span[1],edit["id"]))
+        resolved.sort()
+        for earlier,later in zip(resolved,resolved[1:]):
+            if later[0]<earlier[1]:
+                raise ValueError(f"PP3 edits overlap: {earlier[2]} and {later[2]}")
+
+    result=_semantic_question(
+        "PP3",
+        "PROPOSE_SOURCE_RELATIVE_EDITS",
+        "Propose only bounded replacement edits against original_user_prompt. The purpose is to clarify or normalize the existing text while preserving its mapped semantics. Do not regenerate the whole prompt from an abstract representation. Do not add execution strategy, methods, quality criteria, deliverables, assumptions, constraints, scope, or requirements not already represented in context_map. An empty edit list is valid when no safe revision improves the text.",
+        {"original_user_prompt":original_prompt,"context_map":context_map,"attention_map":attention_map},
+        {
+            "edits":[{
+                "id":"E#",
+                "source_text":"exact substring from original_user_prompt",
+                "occurrence":1,
+                "replacement":"string",
+                "purpose":"EDIT_PURPOSE",
+                "semantic_item_ids":["S#"],
+                "relation_ids":["R#"],
+            }]
+        },
+        [
+            "Edit purposes: "+_enum_descriptions(PREPROCESSOR_EDIT_PURPOSES),
+            "Use REPLACE semantics only: each edit replaces one exact anchored source substring.",
+            "High semantic attention means low editing freedom.",
+            "LOCKED anchored wording must survive verbatim inside any edit that touches it.",
+            "Execution planning is forbidden in this step.",
+        ],
+        validate,
+    )
+    return result["edits"]
+
+
+def _apply_edits(original_prompt:str,edits:list[dict[str,Any]])->tuple[str,list[dict[str,Any]]]:
+    resolved=[]
+    for edit in edits:
+        start,end=_source_anchor(original_prompt,edit["source_text"],edit["occurrence"],edit["id"])
+        resolved.append((start,end,edit))
+    resolved.sort(key=lambda x:x[0],reverse=True)
+    candidate=original_prompt
+    patch_log=[]
+    for start,end,edit in resolved:
+        before=candidate[start:end]
+        if before!=edit["source_text"]:
+            raise ValueError(f"edit anchor mismatch for {edit['id']}")
+        candidate=candidate[:start]+edit["replacement"]+candidate[end:]
+        patch_log.append({
+            "edit_id":edit["id"],
+            "start":start,
+            "end":end,
+            "source_text":edit["source_text"],
+            "replacement":edit["replacement"],
+        })
+    patch_log.reverse()
+    return candidate,patch_log
+
+
+def _audit_context_maps(original_map:dict[str,Any],candidate_map:dict[str,Any],original_prompt:str,candidate_prompt:str)->dict[str,Any]:
+    original_items={x["id"] for x in original_map["semantic_items"]}
+    candidate_items={x["id"] for x in candidate_map["semantic_items"]}
+    original_relations={x["id"] for x in original_map["relations"]}
+    candidate_relations={x["id"] for x in candidate_map["relations"]}
+
+    def validate(v):
+        _require_exact_keys(v,{"item_alignment","relation_alignment","added_candidate_item_ids","added_candidate_relation_ids","other_semantic_changes"},"PP5")
+        item_alignment=v["item_alignment"]
+        if not isinstance(item_alignment,list) or {x.get("source_id") for x in item_alignment if isinstance(x,dict)}!=original_items:
+            raise ValueError("PP5 item alignment must cover every original semantic item exactly once")
+        seen=set()
+        for item in item_alignment:
+            _require_exact_keys(item,{"source_id","candidate_ids","result","changed_features","note"},"PP5 item alignment")
+            if item["source_id"] in seen:
+                raise ValueError("PP5 duplicate source item")
+            seen.add(item["source_id"])
+            cids=_string_array(item["candidate_ids"],"PP5 candidate item ids")
+            if any(x not in candidate_items for x in cids):
+                raise ValueError("PP5 item alignment references unknown candidate item")
+            if item["result"] not in PREPROCESSOR_AUDIT_RESULTS:
+                raise ValueError("PP5 item result invalid")
+            changed=_string_array(item["changed_features"],"PP5 changed_features")
+            if any(x not in PREPROCESSOR_FEATURES for x in changed):
+                raise ValueError("PP5 changed feature invalid")
+            if item["result"]=="EQUIVALENT" and changed:
+                raise ValueError("PP5 equivalent item cannot report changed features")
+            require_text(item["note"],"PP5 item note")
+
+        relation_alignment=v["relation_alignment"]
+        if not isinstance(relation_alignment,list) or {x.get("source_id") for x in relation_alignment if isinstance(x,dict)}!=original_relations:
+            raise ValueError("PP5 relation alignment must cover every original relation exactly once")
+        seen=set()
+        for item in relation_alignment:
+            _require_exact_keys(item,{"source_id","candidate_ids","result","note"},"PP5 relation alignment")
+            if item["source_id"] in seen:
+                raise ValueError("PP5 duplicate source relation")
+            seen.add(item["source_id"])
+            cids=_string_array(item["candidate_ids"],"PP5 candidate relation ids")
+            if any(x not in candidate_relations for x in cids):
+                raise ValueError("PP5 relation alignment references unknown candidate relation")
+            if item["result"] not in PREPROCESSOR_AUDIT_RESULTS:
+                raise ValueError("PP5 relation result invalid")
+            require_text(item["note"],"PP5 relation note")
+
+        added_items=_string_array(v["added_candidate_item_ids"],"PP5 added_candidate_item_ids")
+        added_relations=_string_array(v["added_candidate_relation_ids"],"PP5 added_candidate_relation_ids")
+        if any(x not in candidate_items for x in added_items):
+            raise ValueError("PP5 added item id unknown")
+        if any(x not in candidate_relations for x in added_relations):
+            raise ValueError("PP5 added relation id unknown")
+        _string_array(v["other_semantic_changes"],"PP5 other_semantic_changes")
+
+    return _semantic_question(
+        "PP5",
+        "ALIGN_AND_AUDIT_CONTEXT_MAPS",
+        "Align the independently generated source and candidate context maps and report semantic preservation. Judge only equivalence: do not improve either prompt. Every original semantic item and relation must align to the candidate meaning that preserves it, or be marked CHANGED or OMITTED. Report any genuinely new candidate semantic item or relation as added. Treat changed cardinality, modality, polarity, scope, referent, comparison set, condition, quantity, order, temporal force, exclusivity, completeness, or degree as semantic change.",
+        {
+            "original_user_prompt":original_prompt,
+            "original_context_map":original_map,
+            "candidate_task_prompt":candidate_prompt,
+            "candidate_context_map":candidate_map,
+        },
+        {
+            "item_alignment":[{
+                "source_id":"S#",
+                "candidate_ids":["S#"],
+                "result":"EQUIVALENT | CHANGED | OMITTED",
+                "changed_features":["FEATURE"],
+                "note":"string",
+            }],
+            "relation_alignment":[{
+                "source_id":"R#",
+                "candidate_ids":["R#"],
+                "result":"EQUIVALENT | CHANGED | OMITTED",
+                "note":"string",
+            }],
+            "added_candidate_item_ids":["S#"],
+            "added_candidate_relation_ids":["R#"],
+            "other_semantic_changes":["string"],
+        },
+        [
+            "Audit results: EQUIVALENT — meaning is preserved; CHANGED — represented meaning differs; OMITTED — represented meaning is missing.",
+            "Feature names: "+_enum_descriptions(PREPROCESSOR_FEATURES),
+            "Do not penalize stylistic or syntactic differences that preserve the mapped semantics.",
+            "Do not treat execution strategy as an acceptable addition to task semantics.",
+        ],
+        validate,
+    )
+
+
+def _audit_passes(audit:dict[str,Any])->bool:
+    if any(item["result"]!="EQUIVALENT" for item in audit["item_alignment"]):
+        return False
+    if any(item["result"]!="EQUIVALENT" for item in audit["relation_alignment"]):
+        return False
+    return not audit["added_candidate_item_ids"] and not audit["added_candidate_relation_ids"] and not audit["other_semantic_changes"]
+
+
 def _validate_graph(actions:list[dict[str,Any]],dependencies:list[dict[str,Any]])->list[str]:
-    ids=[item["id"] for item in actions]; valid=set(ids)
-    incoming={item:0 for item in ids}; outgoing={item:[] for item in ids}
+    ids=[item["id"] for item in actions]
+    valid=set(ids)
+    incoming={item:0 for item in ids}
+    outgoing={item:[] for item in ids}
     for dep in dependencies:
-        if dep["from_action"] not in valid or dep["to_action"] not in valid: raise ValueError("dependency references unknown action")
-        if dep["from_action"]==dep["to_action"]: raise ValueError("action cannot depend on itself")
-        outgoing[dep["from_action"]].append(dep["to_action"]); incoming[dep["to_action"]]+=1
-    queue=[item for item in ids if incoming[item]==0]; out=[]
+        if dep["from_action"] not in valid or dep["to_action"] not in valid:
+            raise ValueError("dependency references unknown action")
+        if dep["from_action"]==dep["to_action"]:
+            raise ValueError("action cannot depend on itself")
+        outgoing[dep["from_action"]].append(dep["to_action"])
+        incoming[dep["to_action"]]+=1
+    queue=[item for item in ids if incoming[item]==0]
+    out=[]
     while queue:
-        current=queue.pop(0); out.append(current)
+        current=queue.pop(0)
+        out.append(current)
         for nxt in outgoing[current]:
             incoming[nxt]-=1
-            if incoming[nxt]==0: queue.append(nxt)
-    if len(out)!=len(actions): raise ValueError("preprocessor dependency graph contains a cycle")
+            if incoming[nxt]==0:
+                queue.append(nxt)
+    if len(out)!=len(actions):
+        raise ValueError("preprocessor execution graph contains a cycle")
     return out
 
-def _pp1(original_prompt:str):
+
+def _execution_plan(task_prompt:str,context_map:dict[str,Any])->dict[str,Any]:
+    semantic_ids={item["id"] for item in context_map["semantic_items"]}
+
     def validate(v):
-        _require_exact_keys(v,{"goal","supporting_text"},"PP1")
-        require_text(v["goal"],"PP1.goal"); _supporting_text(v["supporting_text"],"PP1.supporting_text",original_prompt)
-    return _semantic_question("PP1","IDENTIFY_GOAL","Read original_user_prompt. State the terminal result or state the user wants to exist when the request is fully satisfied. Do not describe implementation steps. Do not add requirements, assumptions, criteria, or constraints. supporting_text must contain one or more exact substrings copied from original_user_prompt that support the goal.",{"original_user_prompt":original_prompt},{"goal":"string","supporting_text":["exact substring from original_user_prompt"]},["Perform only semantic analysis; do not execute the user task.","Do not improve or broaden the request."],validate)
+        _require_exact_keys(v,{"actions","dependencies"},"PP6")
+        actions=_numbered_objects(
+            v["actions"],"A","PP6.actions",
+            {"id","command","semantic_item_ids"},
+            allow_empty=False,
+        )
+        action_ids={item["id"] for item in actions}
+        for item in actions:
+            require_text(item["command"],"PP6 action command")
+            refs=_string_array(item["semantic_item_ids"],"PP6 semantic_item_ids",allow_empty=False)
+            if any(x not in semantic_ids for x in refs):
+                raise ValueError("PP6 action references unknown semantic item")
+        dependencies=v["dependencies"]
+        if not isinstance(dependencies,list):
+            raise ValueError("PP6 dependencies must be an array")
+        for dep in dependencies:
+            _require_exact_keys(dep,{"from_action","to_action","relationship"},"PP6 dependency")
+            if dep["from_action"] not in action_ids or dep["to_action"] not in action_ids:
+                raise ValueError("PP6 dependency references unknown action")
+            if dep["relationship"] not in PREPROCESSOR_EXEC_DEPENDENCIES:
+                raise ValueError("PP6 dependency relationship invalid")
+        _validate_graph(actions,dependencies)
 
-def _pp2(original_prompt:str,goal:dict[str,Any]):
-    def validate(v):
-        _require_exact_keys(v,{"requirements"},"PP2")
-        for item in _numbered_objects(v["requirements"],"R","PP2.requirements",{"id","text","supporting_text"},allow_empty=False):
-            require_text(item["text"],"PP2 requirement text"); _supporting_text(item["supporting_text"],"PP2 supporting_text",original_prompt)
-    return _semantic_question("PP2","DECOMPOSE_REQUIREMENTS","Decompose original_user_prompt into every independently testable user requirement. Preserve semantic strength, quantities, restrictions, requested outputs, and qualifications. Do not combine requirements that could independently be satisfied or fail. supporting_text for each requirement must contain exact substrings copied from original_user_prompt.",{"original_user_prompt":original_prompt,"goal":goal},{"requirements":[{"id":"R#","text":"string","supporting_text":["exact substring"]}]},["Do not invent requirements.","Do not perform any requested action."],validate)
+    return _semantic_question(
+        "PP6",
+        "DERIVE_EXECUTION_PLAN",
+        "Derive a minimal dependency-aware execution plan for satisfying task_prompt. This plan is operational control data only and must not be used to rewrite task_prompt. Actions may select necessary methods, tools, or information-acquisition steps, but they must serve only the mapped user semantics and must not add user-facing requirements, quality criteria, deliverables, or goals.",
+        {"task_prompt":task_prompt,"accepted_context_map":context_map},
+        {
+            "actions":[{
+                "id":"A#",
+                "command":"one executable material action clause",
+                "semantic_item_ids":["S#"],
+            }],
+            "dependencies":[{
+                "from_action":"A#",
+                "to_action":"A#",
+                "relationship":"REQUIRES_OUTPUT | REQUIRES_COMPLETION",
+            }],
+        },
+        [
+            "Dependency relationships: REQUIRES_OUTPUT — the earlier action produces an input needed by the later action; REQUIRES_COMPLETION — the earlier action must complete first even if no output is consumed.",
+            "Do not encode the execution plan back into task_prompt.",
+            "Do not add work merely because it would improve the answer beyond the user's request.",
+        ],
+        validate,
+    )
 
-def _pp3(requirements:list[dict[str,Any]]):
-    req_ids={x["id"] for x in requirements}
-    def validate(v):
-        _require_exact_keys(v,{"actions"},"PP3")
-        for item in _numbered_objects(v["actions"],"A","PP3.actions",{"id","type","subtype","semantic_description","requirement_ids"},allow_empty=False):
-            if item["type"] not in ACTION_SUBTYPES or item["subtype"] not in ACTION_SUBTYPES[item["type"]]: raise ValueError("PP3 action ontology invalid")
-            require_text(item["semantic_description"],"PP3 semantic_description")
-            refs=_string_array(item["requirement_ids"],"PP3 requirement_ids",allow_empty=False)
-            if any(x not in req_ids for x in refs): raise ValueError("PP3 references unknown requirement")
-    return _semantic_question("PP3","DECOMPOSE_ACTIONS",f"Identify the smallest meaningful material operations required to satisfy the listed requirements. Do not perform any operation. Classify every operation using exactly one supplied action type and subtype. Use these self-describing choices: {ACTION_ONTOLOGY_TEXT}",{"requirements":requirements,"action_ontology":ACTION_ONTOLOGY_DESCRIPTIONS},{"actions":[{"id":"A#","type":"ACTION_TYPE","subtype":"ACTION_SUBTYPE","semantic_description":"string","requirement_ids":["R#"]}]},["Every action must support at least one requirement.","Do not add actions that merely improve the task beyond the user's request."],validate)
-
-def _pp4(original_prompt:str,requirements:list[dict[str,Any]],actions:list[dict[str,Any]]):
-    action_ids={x["id"] for x in actions}
-    def validate(v):
-        _require_exact_keys(v,{"action_arguments"},"PP4")
-        items=v["action_arguments"]
-        if not isinstance(items,list) or len(items)!=len(actions): raise ValueError("PP4 must contain exactly one argument object per action")
-        seen=set()
-        for item in items:
-            _require_exact_keys(item,{"action_id","target","inputs","outputs","referents"},"PP4 action argument")
-            if item["action_id"] not in action_ids or item["action_id"] in seen: raise ValueError("PP4 action_id invalid or duplicate")
-            seen.add(item["action_id"]); require_text(item["target"],"PP4 target")
-            _string_array(item["inputs"],"PP4 inputs"); _string_array(item["outputs"],"PP4 outputs"); _string_array(item["referents"],"PP4 referents")
-    return _semantic_question("PP4","IDENTIFY_ACTION_ARGUMENTS","For each action, identify what it acts on, what semantic inputs it requires, what result it produces, and the relevant referents. Do not invent inputs not supported by the request or necessary outputs of another identified action.",{"original_user_prompt":original_prompt,"requirements":requirements,"actions":actions},{"action_arguments":[{"action_id":"A#","target":"string","inputs":["string"],"outputs":["string"],"referents":["string"]}]},["Return exactly one object per action.","Do not perform the actions."],validate)
-
-def _pp5(original_prompt:str,actions:list[dict[str,Any]]):
-    action_ids={x["id"] for x in actions}; kinds=set(PREPROCESSOR_GOVERNING_KINDS)
-    def validate(v):
-        _require_exact_keys(v,{"governing_fragments"},"PP5")
-        for item in _numbered_objects(v["governing_fragments"],"G","PP5.governing_fragments",{"id","kind","text","applies_to","supporting_text"},allow_empty=True):
-            if item["kind"] not in kinds: raise ValueError("PP5 governing kind invalid")
-            require_text(item["text"],"PP5 text"); refs=_string_array(item["applies_to"],"PP5 applies_to",allow_empty=False)
-            if any(x not in action_ids for x in refs): raise ValueError("PP5 unknown action")
-            _supporting_text(item["supporting_text"],"PP5 supporting_text",original_prompt)
-    return _semantic_question("PP5","IDENTIFY_GOVERNING_FRAGMENTS",f"Identify semantic elements in the user request that govern how one or more actions may be performed but are not themselves actions. Use only these kinds: {_enum_descriptions(PREPROCESSOR_GOVERNING_KINDS)} Preserve original semantic strength and scope.",{"original_user_prompt":original_prompt,"actions":actions},{"governing_fragments":[{"id":"G#","kind":"KIND","text":"string","applies_to":["A#"],"supporting_text":["exact substring"]}]},["Return [] when no governing fragment is present.","Do not invent prudent or useful constraints."],validate)
-
-def _pp6(original_prompt:str,requirements:list[dict[str,Any]],actions:list[dict[str,Any]]):
-    valid={x["id"] for x in requirements}|{x["id"] for x in actions}; kinds=set(PREPROCESSOR_MODIFIER_KINDS)
-    def validate(v):
-        _require_exact_keys(v,{"modifiers"},"PP6")
-        for item in _numbered_objects(v["modifiers"],"M","PP6.modifiers",{"id","kind","value","applies_to","supporting_text"},allow_empty=True):
-            if item["kind"] not in kinds: raise ValueError("PP6 modifier kind invalid")
-            require_text(str(item["value"]),"PP6 value"); refs=_string_array(item["applies_to"],"PP6 applies_to",allow_empty=False)
-            if any(x not in valid for x in refs): raise ValueError("PP6 unknown reference")
-            _supporting_text(item["supporting_text"],"PP6 supporting_text",original_prompt)
-    return _semantic_question("PP6","IDENTIFY_MODIFIERS",f"Identify every quantity, scope operator, selection/comparison criterion, recency requirement, exclusivity operator, completeness requirement, priority, or other represented modifier. Use only these kinds: {_enum_descriptions(PREPROCESSOR_MODIFIER_KINDS)}",{"original_user_prompt":original_prompt,"requirements":requirements,"actions":actions},{"modifiers":[{"id":"M#","kind":"KIND","value":"string","applies_to":["R# or A#"],"supporting_text":["exact substring"]}]},["Pay particular attention to words such as only, all, every, latest, recent, exactly, at least, at most, before, and after.","Do not create implied preferences."],validate)
-
-def _pp7(actions:list[dict[str,Any]],arguments:list[dict[str,Any]],governing:list[dict[str,Any]]):
-    action_ids={x["id"] for x in actions}
-    def validate(v):
-        _require_exact_keys(v,{"dependencies"},"PP7")
-        if not isinstance(v["dependencies"],list): raise ValueError("PP7 dependencies must be array")
-        for dep in v["dependencies"]:
-            _require_exact_keys(dep,{"from_action","to_action","relationship"},"PP7 dependency")
-            if dep["from_action"] not in action_ids or dep["to_action"] not in action_ids: raise ValueError("PP7 unknown action")
-            if dep["relationship"] not in {"REQUIRES_OUTPUT","REQUIRES_COMPLETION"}: raise ValueError("PP7 relationship invalid")
-        _validate_graph(actions,v["dependencies"])
-    return _semantic_question("PP7","IDENTIFY_DEPENDENCIES","Determine which actions semantically require outputs or completion of other actions before they can be performed. Do not impose an order merely because actions were mentioned in that order. Use REQUIRES_OUTPUT — the earlier action produces an input required by the later action; REQUIRES_COMPLETION — the earlier action must complete first even when no direct output is consumed.",{"actions":actions,"action_arguments":arguments,"governing_fragments":governing},{"dependencies":[{"from_action":"A#","to_action":"A#","relationship":"REQUIRES_OUTPUT | REQUIRES_COMPLETION"}]},["Return [] when actions are semantically independent.","The graph must be acyclic."],validate)
-
-def _pp8(original_prompt:str,actions:list[dict[str,Any]]):
-    action_ids={x["id"] for x in actions}
-    def arr(value,name,prefix,keys):
-        for item in _numbered_objects(value,prefix,name,keys,allow_empty=True):
-            refs=_string_array(item["applies_to"],f"{name} applies_to",allow_empty=False)
-            if any(x not in action_ids for x in refs): raise ValueError(f"{name} unknown action")
-            _supporting_text(item["supporting_text"],f"{name} supporting_text",original_prompt)
-            require_text(item["text"],f"{name} text")
-    def validate(v):
-        _require_exact_keys(v,{"conditions","alternatives","fallbacks"},"PP8")
-        arr(v["conditions"],"PP8.conditions","C",{"id","text","applies_to","supporting_text"})
-        arr(v["alternatives"],"PP8.alternatives","L",{"id","text","applies_to","supporting_text"})
-        arr(v["fallbacks"],"PP8.fallbacks","F",{"id","text","applies_to","supporting_text"})
-    return _semantic_question("PP8","IDENTIFY_BRANCHING","Identify explicit or necessarily represented conditional execution, alternatives, fallbacks, exceptions, and mutually exclusive paths. Do not create fallback behavior merely because one might be useful.",{"original_user_prompt":original_prompt,"actions":actions},{"conditions":[{"id":"C#","text":"string","applies_to":["A#"],"supporting_text":["exact substring"]}],"alternatives":[{"id":"L#","text":"string","applies_to":["A#"],"supporting_text":["exact substring"]}],"fallbacks":[{"id":"F#","text":"string","applies_to":["A#"],"supporting_text":["exact substring"]}]},["Return empty arrays for absent categories.","Do not execute a branch."],validate)
-
-def _pp9(original_prompt:str,goal:dict[str,Any],requirements:list[dict[str,Any]]):
-    req_ids={x["id"] for x in requirements}; kinds=set(PREPROCESSOR_DELIVERABLE_KINDS)
-    def validate(v):
-        _require_exact_keys(v,{"deliverables"},"PP9")
-        for item in _numbered_objects(v["deliverables"],"D","PP9.deliverables",{"id","kind","description","requirement_ids","supporting_text"},allow_empty=False):
-            if item["kind"] not in kinds: raise ValueError("PP9 kind invalid")
-            require_text(item["description"],"PP9 description"); refs=_string_array(item["requirement_ids"],"PP9 requirement_ids",allow_empty=False)
-            if any(x not in req_ids for x in refs): raise ValueError("PP9 unknown requirement")
-            _supporting_text(item["supporting_text"],"PP9 supporting_text",original_prompt)
-    return _semantic_question("PP9","IDENTIFY_DELIVERABLES",f"Identify everything the user expects to receive, observe, or have changed when the task is complete. Distinguish intermediate action outputs from user-facing deliverables. Use only these kinds: {_enum_descriptions(PREPROCESSOR_DELIVERABLE_KINDS)}",{"original_user_prompt":original_prompt,"goal":goal,"requirements":requirements},{"deliverables":[{"id":"D#","kind":"KIND","description":"string","requirement_ids":["R#"],"supporting_text":["exact substring"]}]},["Every deliverable must map to at least one requirement.","Do not add presentation requirements the user did not request."],validate)
-
-def _pp10(original_prompt:str,current_ir:dict[str,Any]):
-    def validate(v):
-        _require_exact_keys(v,{"ambiguities"},"PP10")
-        items=_numbered_objects(v["ambiguities"],"U","PP10.ambiguities",{"id","subject","interpretations","material","supporting_text"},allow_empty=True)
-        for item in items:
-            require_text(item["subject"],"PP10 subject"); interpretations=_string_array(item["interpretations"],"PP10 interpretations",allow_empty=False)
-            if len(interpretations)<2: raise ValueError("PP10 ambiguity needs at least two interpretations")
-            if not isinstance(item["material"],bool): raise ValueError("PP10 material must be boolean")
-            _supporting_text(item["supporting_text"],"PP10 supporting_text",original_prompt)
-    return _semantic_question("PP10","DETECT_AMBIGUITY","Identify terms, referents, scopes, criteria, quantities, relationships, or requested outcomes that have more than one materially different plausible interpretation. Do not resolve an ambiguity. Report the plausible interpretations and whether the difference would materially change execution or correctness.",{"original_user_prompt":original_prompt,"current_semantic_representation":current_ir},{"ambiguities":[{"id":"U#","subject":"string","interpretations":["string","string"],"material":"boolean","supporting_text":["exact substring"]}]},["Do not invent ambiguity merely because more detail could be supplied.","Do not resolve an identified ambiguity."],validate)
-
-def _render_fragment(qid:str,semantic_function:str,instruction:str,inputs:dict[str,Any])->str:
-    def validate(v): _require_exact_keys(v,{"fragment"},qid); require_text(v["fragment"],f"{qid}.fragment")
-    return _semantic_question(qid,semantic_function,instruction,inputs,{"fragment":"string"},["Generate only the requested fragment.","Do not add semantic content not represented in inputs."],validate)["fragment"]
-
-def _render_fragments(ir:dict[str,Any])->dict[str,Any]:
-    fragments={"goal":"","actions":{},"governing":{},"conditions":{},"alternatives":{},"fallbacks":{},"deliverables":{}}
-    fragments["goal"]=_render_fragment("PP11-GOAL","RENDER_GOAL_FRAGMENT","Express the supplied goal as one concise task-goal clause. Preserve its semantic strength and referents exactly. Do not add implementation steps.",{"goal":ir["goal"]})
-    args_by={x["action_id"]:x for x in ir["action_arguments"]}
-    for action in ir["actions"]:
-        aid=action["id"]; modifiers=[x for x in ir["modifiers"] if aid in x["applies_to"]]
-        fragments["actions"][aid]=_render_fragment(f"PP11-{aid}","RENDER_ACTION_FRAGMENT","Express the supplied action as one executable imperative clause. Preserve exactly the action semantics, target, inputs, outputs, referents, and modifiers. Do not merge it with another action and do not add planning or rationale.",{"action":action,"arguments":args_by[aid],"modifiers":modifiers})
-    for item in ir["governing_fragments"]:
-        fragments["governing"][item["id"]]=_render_fragment(f"PP11-{item['id']}","RENDER_GOVERNING_FRAGMENT","Express this governing semantic element as one concise instruction clause. Preserve its strength and scope exactly.",{"governing_fragment":item})
-    for item in ir["conditions"]:
-        fragments["conditions"][item["id"]]=_render_fragment(f"PP11-{item['id']}","RENDER_CONDITION_FRAGMENT","Express this condition as one concise conditional instruction clause without adding consequences not represented by applies_to.",{"condition":item})
-    for item in ir["alternatives"]:
-        fragments["alternatives"][item["id"]]=_render_fragment(f"PP11-{item['id']}","RENDER_ALTERNATIVE_FRAGMENT","Express this alternative-path relationship as one concise instruction clause. Preserve whether the represented paths are mutually exclusive or optional.",{"alternative":item})
-    for item in ir["fallbacks"]:
-        fragments["fallbacks"][item["id"]]=_render_fragment(f"PP11-{item['id']}","RENDER_FALLBACK_FRAGMENT","Express this explicit fallback relationship as one concise instruction clause without inventing triggering conditions.",{"fallback":item})
-    for item in ir["deliverables"]:
-        fragments["deliverables"][item["id"]]=_render_fragment(f"PP11-{item['id']}","RENDER_DELIVERABLE_FRAGMENT","Express this required user-facing deliverable as one concise imperative clause without adding content requirements.",{"deliverable":item})
-    return fragments
-
-def _recompose(ir:dict[str,Any],fragments:dict[str,Any])->tuple[str,str]:
-    order=_validate_graph(ir["actions"],ir["dependencies"])
-    sections=["TASK\n"+fragments["goal"]]
-    if order:
-        sections.append("PERFORM\n"+"\n".join(f"{i}. {fragments['actions'][aid]}" for i,aid in enumerate(order,1)))
-    if fragments["governing"]:
-        sections.append("CONSTRAINTS\n"+"\n".join(f"- {fragments['governing'][item['id']]}" for item in ir["governing_fragments"]))
-    branch_lines=[]
-    for group,key in [("conditions","conditions"),("alternatives","alternatives"),("fallbacks","fallbacks")]:
-        branch_lines.extend(f"- {fragments[group][item['id']]}" for item in ir[key])
-    if branch_lines: sections.append("CONDITIONS AND ALTERNATIVES\n"+"\n".join(branch_lines))
-    sections.append("DELIVER\n"+"\n".join(f"- {fragments['deliverables'][item['id']]}" for item in ir["deliverables"]))
-    task_prompt="\n\n".join(sections)
-    first_command=fragments["actions"][order[0]] if order else "Perform exactly one material next action toward task_prompt."
-    return task_prompt,first_command
-
-def _pp12(original_prompt:str,ir:dict[str,Any],candidate_task_prompt:str):
-    keys={"omitted","added","strength_changed","referent_changed","other_semantic_changes"}
-    def validate(v):
-        _require_exact_keys(v,keys,"PP12")
-        for key in keys: _string_array(v[key],f"PP12.{key}")
-    return _semantic_question("PP12","AUDIT_RECOMPOSITION","Compare original_user_prompt, prompt_ir, and candidate_task_prompt. Do not improve or rewrite either prompt. Report only semantic information that was omitted, added, strengthened, weakened, assigned to the wrong referent, or otherwise changed. Use empty arrays when no issue of a category exists.",{"original_user_prompt":original_prompt,"prompt_ir":ir,"candidate_task_prompt":candidate_task_prompt},{"omitted":["string"],"added":["string"],"strength_changed":["string"],"referent_changed":["string"],"other_semantic_changes":["string"]},["This is an equivalence audit, not an optimization task.","Do not propose improvements."],validate)
 
 def run_prompt_preprocessor(original_prompt:str)->dict[str,Any]:
-    goal=_pp1(original_prompt)
-    requirements=_pp2(original_prompt,goal)["requirements"]
-    actions=_pp3(requirements)["actions"]
-    arguments=_pp4(original_prompt,requirements,actions)["action_arguments"]
-    governing=_pp5(original_prompt,actions)["governing_fragments"]
-    modifiers=_pp6(original_prompt,requirements,actions)["modifiers"]
-    dependencies=_pp7(actions,arguments,governing)["dependencies"]
-    branching=_pp8(original_prompt,actions)
-    deliverables=_pp9(original_prompt,goal,requirements)["deliverables"]
-    partial_ir={"schema":"prompt-ir-v1","goal":goal,"requirements":requirements,"actions":actions,"action_arguments":arguments,"governing_fragments":governing,"modifiers":modifiers,"dependencies":dependencies,"conditions":branching["conditions"],"alternatives":branching["alternatives"],"fallbacks":branching["fallbacks"],"deliverables":deliverables}
-    ambiguities=_pp10(original_prompt,partial_ir)["ambiguities"]
-    ir={**partial_ir,"ambiguities":ambiguities}
-    if any(item["material"] for item in ambiguities):
-        return {"status":"FALLBACK","reason":"MATERIAL_AMBIGUITY","task_prompt":original_prompt,"prompt_ir":ir}
-    fragments=_render_fragments(ir)
-    candidate,first_command=_recompose(ir,fragments)
-    audit=_pp12(original_prompt,ir,candidate)
-    if any(audit[key] for key in audit):
-        return {"status":"FALLBACK","reason":"SEMANTIC_AUDIT_FAILED","task_prompt":original_prompt,"prompt_ir":ir,"fragments":fragments,"audit":audit}
-    return {"status":"ACCEPTED","reason":None,"task_prompt":candidate,"first_command":first_command,"prompt_ir":ir,"fragments":fragments,"audit":audit}
+    source_map=_context_map(original_prompt,"PP1","MAP_SOURCE_CONTEXT")
+    ir={
+        "schema":"source-anchored-prompt-ir-v2",
+        "source_context_map":source_map,
+    }
+    if any(item["material"] for item in source_map["ambiguities"]):
+        return {
+            "status":"FALLBACK",
+            "reason":"MATERIAL_AMBIGUITY",
+            "task_prompt":original_prompt,
+            "prompt_ir":ir,
+        }
+
+    attention=_attention_map(original_prompt,source_map)
+    ir["attention_map"]=attention
+
+    edits=_propose_edits(original_prompt,source_map,attention)
+    candidate,patch_log=_apply_edits(original_prompt,edits)
+    ir["edits"]=edits
+    ir["patch_log"]=patch_log
+
+    candidate_map=_context_map(candidate,"PP4","REMAP_CANDIDATE_CONTEXT")
+    ir["candidate_context_map"]=candidate_map
+    if any(item["material"] for item in candidate_map["ambiguities"]):
+        return {
+            "status":"FALLBACK",
+            "reason":"CANDIDATE_MATERIAL_AMBIGUITY",
+            "task_prompt":original_prompt,
+            "prompt_ir":ir,
+            "candidate_task_prompt":candidate,
+        }
+
+    audit=_audit_context_maps(source_map,candidate_map,original_prompt,candidate)
+    ir["equivalence_audit"]=audit
+    if not _audit_passes(audit):
+        return {
+            "status":"FALLBACK",
+            "reason":"SEMANTIC_AUDIT_FAILED",
+            "task_prompt":original_prompt,
+            "prompt_ir":ir,
+            "candidate_task_prompt":candidate,
+            "audit":audit,
+        }
+
+    execution_plan=_execution_plan(candidate,candidate_map)
+    ir["execution_plan"]=execution_plan
+    order=_validate_graph(execution_plan["actions"],execution_plan["dependencies"])
+    by_id={item["id"]:item for item in execution_plan["actions"]}
+    first_command=by_id[order[0]]["command"]
+
+    return {
+        "status":"ACCEPTED",
+        "reason":None,
+        "task_prompt":candidate,
+        "first_command":first_command,
+        "prompt_ir":ir,
+        "context_map":source_map,
+        "attention_map":attention,
+        "edits":edits,
+        "patch_log":patch_log,
+        "candidate_context_map":candidate_map,
+        "audit":audit,
+        "execution_plan":execution_plan,
+    }
 
 # --- payload/state --------------------------------------------------------
 
@@ -857,11 +1256,16 @@ def process_initialization(value:Any)->dict[str,Any]:
             state["task_prompt"]=result["task_prompt"]
             state["preprocessor_status"]=result["status"]
             state["preprocessor_reason"]=result.get("reason")
-            state["prompt_intake_mode"]="SEMANTIC_RECOMPOSITION" if result["status"]=="ACCEPTED" else "VERBATIM_FALLBACK"
+            state["prompt_intake_mode"]="SOURCE_ANCHORED_SEMANTIC_EDIT" if result["status"]=="ACCEPTED" else "VERBATIM_FALLBACK"
             state["prompt_ir"]=result.get("prompt_ir")
             if result["status"]=="ACCEPTED":
-                state["preprocessor_fragments"]=result.get("fragments")
+                state["preprocessor_context_map"]=result.get("context_map")
+                state["preprocessor_attention_map"]=result.get("attention_map")
+                state["preprocessor_edits"]=result.get("edits")
+                state["preprocessor_patch_log"]=result.get("patch_log")
+                state["preprocessor_candidate_context_map"]=result.get("candidate_context_map")
                 state["preprocessor_audit"]=result.get("audit")
+                state["preprocessor_execution_plan"]=result.get("execution_plan")
                 command=result["first_command"]
             context.update({"preprocessor_status":state["preprocessor_status"],"preprocessor_reason":state.get("preprocessor_reason")})
         except Exception as exc:
