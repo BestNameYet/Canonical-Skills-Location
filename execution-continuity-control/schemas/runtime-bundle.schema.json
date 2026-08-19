@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/BestNameYet/Canonical-Skills-Location/execution-continuity-control/schemas/runtime-bundle.schema.json",
+  "title": "Execution Continuity Runtime Bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "bundle_format",
+    "created_at",
+    "source",
+    "root",
+    "files"
+  ],
+  "properties": {
+    "bundle_format": {
+      "const": "execution-continuity-runtime-bundle/v1"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "branch",
+        "commit_sha"
+      ],
+      "properties": {
+        "repository": {
+          "const": "BestNameYet/Canonical-Skills-Location"
+        },
+        "branch": {
+          "const": "main"
+        },
+        "commit_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      }
+    },
+    "root": {
+      "const": "execution-continuity-control/"
+    },
+    "files": {
+      "type": "array",
+      "minItems": 7,
+      "items": {
+        "$ref": "#/$defs/file"
+      },
+      "allOf": [
+        {"contains": {"properties": {"path": {"const": "SKILL.md"}}, "required": ["path"]}},
+        {"contains": {"properties": {"path": {"const": "DESIGN_HISTORY.md"}}, "required": ["path"]}},
+        {"contains": {"properties": {"path": {"const": "schemas/execution-record.schema.json"}}, "required": ["path"]}},
+        {"contains": {"properties": {"path": {"const": "schemas/runtime-bundle.schema.json"}}, "required": ["path"]}},
+        {"contains": {"properties": {"path": {"const": "scripts/action_event_recorder.py"}}, "required": ["path"]}},
+        {"contains": {"properties": {"path": {"const": "scripts/action_questioner.py"}}, "required": ["path"]}},
+        {"contains": {"properties": {"path": {"const": "scripts/end_turn_router.py"}}, "required": ["path"]}}
+      ]
+    }
+  },
+  "$defs": {
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "git_blob_sha",
+        "encoding",
+        "content"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+        },
+        "git_blob_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "encoding": {
+          "const": "utf-8"
+        },
+        "content": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
