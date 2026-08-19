@@ -1,30 +1,26 @@
 #!/usr/bin/env python3
 """Deterministic Pre-END-TURN continuation questionnaire router.
 
-The model answers one question at a time. This script owns legal routing,
-persists the actual traversal, and emits only QUESTION or DIRECTIVE outputs.
-It does not perform task work and does not write execution-record snapshots.
+The action questioner invokes this script only after AQ2 establishes that the
+tracked action is an end-of-turn attempt. The model answers one router question
+at a time. The script owns legal traversal and directive classification.
 
-Runtime router state and audit payloads are implementation bookkeeping. They
-are validated structurally by this script and do not declare independent
-format identities.
-
-Usage:
-  python end_turn_router.py start  --state router-state.json
-  python end_turn_router.py answer --state router-state.json --answer NO
-  python end_turn_router.py show   --state router-state.json
-  python end_turn_router.py reset  --state router-state.json
+When a cycle reaches CONTINUE, COMPLETE, or IMPASSE, the router sends one
+formatted ``router_cycle`` data object to ``action_event_recorder.py``. The
+recorder appends that object to a new immutable execution-record snapshot.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 Q = {
 "Q1":("Did any attempted tool, method, command, source, operation, or execution path fail, error, become unavailable, or produce less of the needed result than requested?",["YES","NO"]),
@@ -91,7 +87,6 @@ Q = {
 "C4":("Is the proposed response itself the requested result, or does it actually contain or provide the requested result or a usable reference to it?",["YES","NO"]),
 }
 
-NEXT_TOP={"Q1":"Q2","Q2":"Q3","Q3":"Q4","Q4":"Q5","Q5":"Q6","Q6":"Q7","Q7":"Q8","Q8":"Q9","Q9":"Q10","Q10":"Q11","Q11":"Q12","Q12":"Q13","Q13":"Q14","Q14":"Q15"}
 ALT_NEXT={"A1":"A2","A2":"A3","A3":"A4","A4":"A5","A5":"A6","A6":"A7","A7":"A8","A8":"A9"}
 
 CONTINUE_INSTRUCTIONS={
@@ -145,10 +140,12 @@ CONTINUE_INSTRUCTIONS={
 "C4:NO":"Deliver the actual requested result or a usable reference to it before proposing END_TURN again.",
 }
 
-def now():
-    return datetime.now(timezone.utc).isoformat().replace("+00:00","Z")
 
-def write_json(path,obj):
+def now():
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00","Z")
+
+
+def write_json(path: Path, obj: Any):
     path.parent.mkdir(parents=True,exist_ok=True)
     fd,tmp=tempfile.mkstemp(prefix=path.name+".",suffix=".tmp",dir=str(path.parent))
     try:
@@ -161,6 +158,7 @@ def write_json(path,obj):
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
 
 def validate_state(s):
     if not isinstance(s,dict):
@@ -176,10 +174,12 @@ def validate_state(s):
         raise SystemExit("Router state has invalid current question")
     return s
 
+
 def load(path):
     if not path.exists():
         raise SystemExit(f"State file does not exist: {path}")
     return validate_state(json.loads(path.read_text(encoding="utf-8")))
+
 
 def norm(qid,raw):
     raw=raw.strip()
@@ -188,6 +188,7 @@ def norm(qid,raw):
     k=raw.upper().strip()
     aliases={"Y":"YES","N":"NO","ONLY THIS PATH":"ONLY_THIS_PATH","THIS PATH":"ONLY_THIS_PATH","PATH ONLY":"ONLY_THIS_PATH","PREVENTS RESULT":"PREVENTS_RESULT","TASK WIDE":"PREVENTS_RESULT","TASK-WIDE":"PREVENTS_RESULT","UNSURE":"UNKNOWN","DON'T KNOW":"UNKNOWN","DONT KNOW":"UNKNOWN"}
     return aliases.get(k,k)
+
 
 def compact(trace):
     out=[]
@@ -200,16 +201,65 @@ def compact(trace):
             out.append(f"{x['directive']}: {x.get('instruction','')}".rstrip(": "))
     return " → ".join(out)
 
+
 def payload_q(s):
     qid=s["current"]
     text,allowed=Q[qid]
-    return {"status":"QUESTION","cycle_id":s["cycle_id"],"question_id":qid,"question":text,"allowed_answers":allowed,"trace":s["trace"],"trace_compact":compact(s["trace"])}
+    return {"status":"QUESTION","state":s["state_path"],"cycle_id":s["cycle_id"],"question_id":qid,"question":text,"allowed_answers":allowed,"trace":s["trace"],"trace_compact":compact(s["trace"])}
+
 
 def goto(s,qid):
     s["current"]=qid
     s["status"]="QUESTION"
     s["updated_at"]=now()
     return payload_q(s)
+
+
+def run_json(command: list[str]) -> dict[str, Any]:
+    completed=subprocess.run(command,capture_output=True,text=True)
+    stdout=completed.stdout.strip()
+    if not stdout:
+        raise RuntimeError(f"recorder produced no JSON; stderr={completed.stderr.strip()!r}")
+    try:
+        data=json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"recorder produced invalid JSON: {stdout!r}") from exc
+    if completed.returncode!=0:
+        raise RuntimeError(f"recorder failed: {data!r}")
+    return data
+
+
+def send_cycle_to_recorder(s):
+    pairs=[]
+    for item in s["trace"]:
+        if item.get("kind")!="answer":
+            continue
+        qid=item["question_id"]
+        pairs.append({"id":qid,"question":Q[qid][0],"answer":item["answer"]})
+    payload={
+        "action_type":"router_cycle",
+        "scope":s["scope"],
+        "pairs":pairs,
+        "directive":s["directive"],
+    }
+    if s["directive"]=="CONTINUE":
+        payload["instruction"]=s["instruction"]
+    if s["directive"]=="IMPASSE":
+        payload["impasse_evidence"]=s.get("impasse_evidence") or "No additional impasse evidence was captured beyond the recorded router answers."
+    if s.get("source"):
+        payload["source"]=s["source"]
+    payload_path=Path(s["state_path"]).with_suffix(".action.json")
+    write_json(payload_path,payload)
+    command=[
+        sys.executable,s["recorder"],"append",
+        "--output-dir",s["output_dir"],
+        "--record",s["record"],
+        "--record-name",s["record_name"],
+        "--record-id",s["record_id"],
+        "--action-file",str(payload_path),
+    ]
+    return run_json(command)
+
 
 def directive(s,d,instruction,evidence=None):
     s["trace"].append({"kind":"directive","directive":d,"instruction":instruction})
@@ -221,10 +271,17 @@ def directive(s,d,instruction,evidence=None):
     s["completed_at"]=now()
     if evidence:
         s["impasse_evidence"]=evidence
-    return {"status":"DIRECTIVE","cycle_id":s["cycle_id"],"directive":d,"terminal":d in {"COMPLETE","IMPASSE"},"end_turn_permitted":d in {"COMPLETE","IMPASSE"},"instruction":instruction,"trace":s["trace"],"trace_compact":compact(s["trace"]),"audit":{"cycle_id":s["cycle_id"],"started_at":s["started_at"],"completed_at":s["completed_at"],"route":s["trace"],"route_compact":compact(s["trace"]),"directive":d,"impasse_evidence":s.get("impasse_evidence")}}
+    receipt=send_cycle_to_recorder(s)
+    s["record_receipt"]=receipt
+    s["record"]=receipt["record"]
+    s["record_name"]=receipt["record_filename"]
+    write_json(Path(s["state_path"]),s)
+    return {"status":"DIRECTIVE","state":s["state_path"],"cycle_id":s["cycle_id"],"directive":d,"terminal":d in {"COMPLETE","IMPASSE"},"end_turn_permitted":d in {"COMPLETE","IMPASSE"},"instruction":instruction,"trace":s["trace"],"trace_compact":compact(s["trace"]),"record":receipt}
+
 
 def cont(s,key):
     return directive(s,"CONTINUE",CONTINUE_INSTRUCTIONS[key])
+
 
 def transition(s,qid,a):
     key=f"{qid}:{a}"
@@ -264,6 +321,7 @@ def transition(s,qid,a):
         return directive(s,"COMPLETE","The questionnaire found no remaining continuation trigger and the Completion Evidence Test is satisfied. END_TURN is permitted.")
     raise RuntimeError(f"Unhandled transition {qid} / {a}")
 
+
 def validate(qid,a):
     allowed=Q[qid][1]
     if allowed==["FREE_TEXT_OR_NONE"]:
@@ -272,6 +330,7 @@ def validate(qid,a):
     elif a not in allowed:
         raise ValueError(f"Invalid answer {a!r}; allowed: {allowed}")
 
+
 def cmd_start(args):
     p=Path(args.state)
     if p.exists() and not args.force:
@@ -279,10 +338,31 @@ def cmd_start(args):
         if s.get("status")=="QUESTION":
             print(json.dumps({"error":"ACTIVE_CYCLE_EXISTS","cycle_id":s["cycle_id"],"current":s["current"]},indent=2))
             return 2
-    s={"cycle_id":args.cycle_id or str(uuid.uuid4()),"started_at":now(),"updated_at":now(),"status":"QUESTION","current":"Q1","trace":[]}
+    source={}
+    if args.chat_id is not None:
+        source["chat_id"]=args.chat_id
+    if args.chat_title is not None:
+        source["chat_title"]=args.chat_title
+    s={
+        "cycle_id":args.cycle_id or str(uuid.uuid4()),
+        "started_at":now(),
+        "updated_at":now(),
+        "status":"QUESTION",
+        "current":"Q1",
+        "trace":[],
+        "state_path":str(p),
+        "scope":args.scope,
+        "recorder":args.recorder,
+        "output_dir":args.output_dir,
+        "record":args.record,
+        "record_name":args.record_name,
+        "record_id":args.record_id,
+        "source":source,
+    }
     write_json(p,s)
     print(json.dumps(payload_q(s),indent=2,ensure_ascii=False))
     return 0
+
 
 def cmd_answer(args):
     p=Path(args.state)
@@ -299,18 +379,21 @@ def cmd_answer(args):
         return 2
     s["trace"].append({"kind":"answer","question_id":qid,"answer":a})
     result=transition(s,qid,a)
-    write_json(p,s)
+    if s.get("status")=="QUESTION":
+        write_json(p,s)
     print(json.dumps(result,indent=2,ensure_ascii=False))
     return 0
+
 
 def cmd_show(args):
     s=load(Path(args.state))
     if s.get("status")=="QUESTION":
         out=payload_q(s)
     else:
-        out={"status":"DIRECTIVE","cycle_id":s["cycle_id"],"directive":s.get("directive"),"end_turn_permitted":s.get("directive") in {"COMPLETE","IMPASSE"},"instruction":s.get("instruction"),"trace":s.get("trace",[]),"trace_compact":compact(s.get("trace",[]))}
+        out={"status":"DIRECTIVE","state":s["state_path"],"cycle_id":s["cycle_id"],"directive":s.get("directive"),"end_turn_permitted":s.get("directive") in {"COMPLETE","IMPASSE"},"instruction":s.get("instruction"),"trace":s.get("trace",[]),"trace_compact":compact(s.get("trace",[])),"record":s.get("record_receipt")}
     print(json.dumps(out,indent=2,ensure_ascii=False))
     return 0
+
 
 def cmd_reset(args):
     p=Path(args.state)
@@ -319,15 +402,33 @@ def cmd_reset(args):
     print(json.dumps({"status":"RESET","state":str(p)},indent=2))
     return 0
 
+
 def main():
     ap=argparse.ArgumentParser()
     sub=ap.add_subparsers(dest="cmd",required=True)
-    p=sub.add_parser("start"); p.add_argument("--state",required=True); p.add_argument("--cycle-id"); p.add_argument("--force",action="store_true"); p.set_defaults(fn=cmd_start)
+    p=sub.add_parser("start")
+    p.add_argument("--state",required=True)
+    p.add_argument("--scope",required=True,choices=["worker","orchestrator"])
+    p.add_argument("--recorder",required=True)
+    p.add_argument("--output-dir",required=True)
+    p.add_argument("--record",required=True)
+    p.add_argument("--record-name",required=True)
+    p.add_argument("--record-id",required=True)
+    p.add_argument("--chat-id")
+    p.add_argument("--chat-title")
+    p.add_argument("--cycle-id")
+    p.add_argument("--force",action="store_true")
+    p.set_defaults(fn=cmd_start)
     p=sub.add_parser("answer"); p.add_argument("--state",required=True); p.add_argument("--answer",required=True); p.set_defaults(fn=cmd_answer)
     p=sub.add_parser("show"); p.add_argument("--state",required=True); p.set_defaults(fn=cmd_show)
     p=sub.add_parser("reset"); p.add_argument("--state",required=True); p.set_defaults(fn=cmd_reset)
     a=ap.parse_args()
-    return a.fn(a)
+    try:
+        return a.fn(a)
+    except Exception as exc:
+        print(json.dumps({"status":"FAIL","code":type(exc).__name__,"detail":str(exc)},ensure_ascii=False))
+        return 2
+
 
 if __name__=="__main__":
     sys.exit(main())
