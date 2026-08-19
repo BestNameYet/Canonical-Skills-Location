@@ -36,6 +36,7 @@ Within that root there is exactly one canonical path for each governed source fi
 
 - `SKILL.md` — this canonical skill;
 - `DESIGN_HISTORY.md` — the canonical cumulative design history;
+- `execution-record.schema.json` — the canonical machine-readable structural contract for persistent execution records;
 - `scripts/action_event_recorder.py` — the canonical recorder source;
 - `scripts/end_turn_router.py` — the canonical router source.
 
@@ -50,13 +51,13 @@ At the start of each governed user turn:
 1. Resolve `main` HEAD to one exact commit SHA.
 2. Treat that SHA as the **canonical turn snapshot**.
 3. Read `SKILL.md` and `DESIGN_HISTORY.md` from that exact SHA.
-4. Read every required bundled script from that same exact SHA.
-5. Do not mix files from different commits in one turn merely because `main` advances while the turn is executing.
+4. Read every required canonical script and, whenever execution-record reading, writing, migration, or validation is required, `execution-record.schema.json` from that same exact SHA.
+5. Do not mix governed files from different commits in one turn merely because `main` advances while the turn is executing.
 6. On a later user turn, resolve `main` again rather than reusing a remembered SHA.
 
 A branch name is a moving reference. A commit SHA is the immutable revision identity.
 
-If the exact canonical turn snapshot cannot be resolved or a required canonical file cannot be read from it, do not silently substitute a stale runtime copy, an historical export, an alternate branch, or an old project artifact as current canon.
+If the exact canonical turn snapshot cannot be resolved or a required canonical file cannot be read from it, do not silently substitute a stale runtime copy, historical export, alternate branch, or old project artifact as current canon.
 
 ### Canonical authority
 
@@ -77,7 +78,7 @@ Normal execution requires read access. Canonical revision requires repository wr
 
 The design history is explanatory and revision-governing evidence. It does not override this skill's operational instructions. It preserves observed failures, design rationale, superseded mechanisms, rejected alternatives, and protected invariants so future revisions do not unknowingly reintroduce corrected errors.
 
-For any canonical turn snapshot, the authoritative design history is the `DESIGN_HISTORY.md` content from the **same commit SHA** as this `SKILL.md`. The common commit identity replaces filename pinning.
+For any canonical turn snapshot, the authoritative design history is the `DESIGN_HISTORY.md` content from the **same commit SHA** as this `SKILL.md`.
 
 ### Required canonical revision procedure
 
@@ -85,25 +86,26 @@ Before changing any canonical source file:
 
 1. Resolve current `main` HEAD to an exact commit SHA.
 2. Read the current `SKILL.md` and `DESIGN_HISTORY.md` from that SHA.
-3. Read the canonical script or scripts touched by the proposed change from that same SHA.
+3. Read every canonical script and format contract touched by the proposed change from that same SHA.
 4. Inspect earlier Git history, relevant prior artifacts, execution records, and relevant chat evidence as needed to establish why the affected mechanisms exist.
 5. Identify every resolved issue and protected invariant touched by the proposed change.
 6. Do not remove, weaken, or simplify a mechanism introduced to solve a recorded problem unless the revision identifies that problem and demonstrates how the replacement still satisfies the protected invariant.
 7. Update `DESIGN_HISTORY.md` so it cumulatively records the new decision, supersession rationale, affected components, and observable evidence.
 8. Write complete replacement content to every changed canonical file at its stable canonical path.
-9. Commit the change to Git. Do not create timestamped canonical filenames as a substitute for committing the stable paths.
+9. Commit the change to Git. Do not create timestamped canonical filenames as a substitute for committing stable paths.
 10. Verify the resulting commit and verify that `main` resolves to a revision containing the intended complete canonical files before treating the revision as current canon.
 
-A canonical update may use one commit or a sequence of commits, but current canonical use always resolves one exact `main` HEAD and reads all governed files from that snapshot.
+A canonical update may be prepared on a noncanonical branch, but canonical authority changes only when the intended coherent revision is reachable from `main`.
 
 The design history contains observable provenance and concise rationale only. It must not contain private chain-of-thought.
 
-## Bundled resources
+## Canonical resources
 
+- `execution-record.schema.json` — normative structural format for persistent project execution-record snapshots.
 - `scripts/action_event_recorder.py` — records one completed material execution unit into the project execution record.
 - `scripts/end_turn_router.py` — runs the continuation questionnaire and emits a continuation, completion, or impasse directive.
 
-Resolve bundled resources from the canonical turn snapshot under the skill root. Do not depend on a fixed local installation path.
+Resolve all required resources from the canonical turn snapshot. Do not depend on a fixed local installation path.
 
 ## Orchestrated execution architecture
 
@@ -139,10 +141,7 @@ The Orchestrator invokes the required script **in lieu of the Worker**.
 
 The Worker's obligation to supply truthful task-state information remains. The Orchestrator's substitution concerns invocation and control, not invention of task-domain facts.
 
-When a script asks a question whose answer depends on the Worker's substantive execution state, the Orchestrator must obtain the answer from the Worker. It may:
-
-- route the script question to the Worker and route the Worker's answer back to the script; or
-- temporarily relinquish control to the Worker for the limited purpose of supplying that script input.
+When a script asks a question whose answer depends on the Worker's substantive execution state, the Orchestrator must obtain the answer from the Worker. It may route the script question to the Worker and route the Worker's answer back to the script, or temporarily relinquish control to the Worker for the limited purpose of supplying that script input.
 
 After the input is supplied, control returns to the Orchestrator.
 
@@ -232,6 +231,30 @@ with `[timestamp]` in sortable UTC `YYYYMMDDTHHMMSSffffffZ` form.
 
 Every material event governed by this skill in any chat belonging to the project is appended to the latest snapshot to produce a new complete snapshot. Earlier snapshots remain immutable historical predecessors.
 
+### Execution-record format contract
+
+The canonical machine-readable structural contract is:
+
+`execution-record.schema.json`
+
+Read it from the same canonical turn snapshot as `SKILL.md` and `scripts/action_event_recorder.py`.
+
+Every newly emitted persistent execution record uses `format_version: 1` and must conform to the canonical structural contract. The canonical recorder enforces the same required fields and types plus cross-field semantic invariants that are not delegated to the schema, including:
+
+- `entry_count` equals the number of entries;
+- project-wide `sequence` values are contiguous starting at 1;
+- `entry_id` values are unique;
+- snapshot filename and encoded timestamp agree;
+- predecessor timestamp precedes the new snapshot timestamp;
+- predecessor filename and SHA-256 occur as a pair;
+- source-record filename and SHA-256 occur as a pair.
+
+Runtime recorder sessions, recorder receipts, router state, and router audit payloads are implementation bookkeeping. They do not declare independent schema identities.
+
+Historical persisted snapshots created before `format_version: 1` remain immutable evidence. The canonical recorder may accept a structurally compatible historical snapshot as an input predecessor, normalize it in memory to the current record structure, and emit a new `format_version: 1` successor. The predecessor file itself must never be rewritten as part of migration.
+
+A format migration therefore creates a new successor in the same append-only lineage; it does not mutate historical evidence.
+
 ### Persistent record store
 
 Execution-record persistence is supplied by a **configured persistent project-record store** available to the execution environment. This skill does not require a particular storage provider.
@@ -244,8 +267,9 @@ For every append:
 4. If a prior record exists, materialize it in the execution environment under a differentiated input filename such as `execution-record_[record timestamp]_input_[copy timestamp].json`.
 5. Run the current recorder Runnable against that input copy. If no prior record exists, run without a source record and initialize the first snapshot.
 6. The recorder creates a new complete `execution-record_[new timestamp].json` whose timestamp is later than its selected predecessor.
-7. Persist the returned snapshot to the configured persistent project-record store.
-8. Before the next append, query the persistent store again and select the greatest encoded timestamp. Do not assume a previously loaded runtime record remains latest.
+7. Verify that the new record satisfies the canonical record format and recorder invariants.
+8. Persist the returned snapshot to the configured persistent project-record store.
+9. Before the next append, query the persistent store again and select the greatest encoded timestamp. Do not assume a previously loaded runtime record remains latest.
 
 The latest persisted snapshot is authoritative for record continuation. Recorder-session state, Runnables, differentiated input copies, receipts, stale runtime outputs, and older snapshots are not substitutes.
 
@@ -307,6 +331,8 @@ Read it from the canonical turn snapshot and create a fresh current-turn Runnabl
 
 The recorder is an audit mechanism, not a behavior controller. The router selects control directives; the recorder records completed execution and router traversal.
 
+The recorder's persistent output contract is `execution-record.schema.json` from the same canonical turn snapshot. Runtime session and receipt files are temporary bookkeeping, not persistent record-format authorities.
+
 ### Orchestrated recorder contract
 
 The Orchestrator performs recorder invocation for both scopes.
@@ -319,7 +345,7 @@ For a **Worker-scoped** material unit:
 4. For each recorder question, the Orchestrator routes the question to the Worker or temporarily relinquishes control so the Worker supplies the answer.
 5. The Orchestrator routes that answer to the recorder without substituting an independent task-domain answer.
 6. Continue until all standard questions have been answered and the new snapshot is emitted.
-7. Persist the snapshot to the configured project-record store and re-resolve the latest record before the next append.
+7. Verify and persist the snapshot to the configured project-record store and re-resolve the latest record before the next append.
 
 For an **Orchestrator-scoped** material unit, the same procedure applies except the Orchestrator answers from observable meta-execution state.
 
