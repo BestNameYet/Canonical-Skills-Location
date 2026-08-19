@@ -52,6 +52,20 @@ Canonical source moved to GitHub. Source identity is stable path + repository + 
 
 Timestamped canonical source filenames and storage-surface collision rules are superseded environment-specific mechanisms. Their underlying invariants remain: mechanically resolvable authority, immutable revision identity, coherent multi-file snapshots, and no stale-copy authority.
 
+### Single runtime bundle bootstrap
+
+A later execution failure exposed an ambiguity in the phrase "copy canonical source into the execution environment": retrieving source through the GitHub connector did not itself create executable files under `/mnt/data`. The model could read canonical scripts yet never materialize or execute them.
+
+The bootstrap contract was therefore made explicit. Retrieval of canonical `SKILL.md` now instructs the caller to pin one `main` commit, retrieve every canonical dependency from that exact SHA, assemble all retrieved contents into one JSON runtime bundle, and write exactly one timestamped bundle instance into `/mnt/data` before continuity runtime execution.
+
+The bundle preserves canonical root-relative paths rather than flattening filenames. Its internal tree contains `SKILL.md`, `DESIGN_HISTORY.md`, both schema files under `schemas/`, and the three Python scripts under `scripts/`. `schemas/runtime-bundle.schema.json` provides the machine-readable bundle contract.
+
+After materialization, the verified bundle becomes the sole local representation of that pinned canonical snapshot for the turn. Local Python files are emitted from that bundle beneath one timestamped derivative tree while preserving `schemas/` and `scripts/` subfolders. Later GitHub reads cannot silently replace bundle content or become independent runtime sources.
+
+This does not give the bundle canonical authority. GitHub repository + stable path + commit SHA remain canonical; the bundle and emitted Runnables are derivatives.
+
+**Retained invariants:** one coherent Git snapshot per turn; no mixed-revision runtime; runtime derivatives have no canonical authority; observable materialization precedes script execution; canonical relative paths remain mechanically identifiable.
+
 ### Explicit execution-record schema
 
 Nominal format labels were replaced by one real canonical JSON Schema at `schemas/execution-record.schema.json`.
@@ -142,6 +156,11 @@ The questioner is intentionally non-evaluative. It validates answer shape, canon
 30. Persistent record semantics are storage-provider neutral.
 31. Persistent record structure is controlled by the canonical JSON Schema plus recorder cross-snapshot invariants.
 32. Historical information is not redundantly restated in every new action object.
+33. Retrieval of canonical `SKILL.md` triggers complete runtime-bundle materialization before continuity runtime execution.
+34. Exactly one timestamped runtime bundle represents the pinned canonical Git snapshot locally for a governed turn.
+35. The runtime bundle preserves canonical root-relative paths, including `schemas/` and `scripts/` subfolder notation.
+36. Every local continuity Runnable for the turn is derived from the same verified bundle; later GitHub reads cannot become independent runtime sources.
+37. Bundle materialization and verification are observable prerequisites for claiming the continuity runtime was initialized.
 
 ## Superseded mechanisms
 
@@ -165,7 +184,10 @@ Do not restore these merely because older artifacts contain them:
 - parallel router-cycle history outside the chronological action stream;
 - blank or prospective router-cycle placeholders;
 - direct router-to-recorder persistence calls;
-- treating a post-action narrative self-report as raw chain-of-thought or independent evidence.
+- treating a post-action narrative self-report as raw chain-of-thought or independent evidence;
+- treating connector retrieval of source text as equivalent to local runtime materialization;
+- independently fetching or copying individual runtime scripts after a verified turn bundle exists;
+- flattening canonical `scripts/` or `schemas/` paths into ambiguous local source identities.
 
 ## Revision rule
 
