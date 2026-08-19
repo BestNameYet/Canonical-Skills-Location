@@ -1,6 +1,6 @@
 ---
 name: execution-continuity-control
-description: Enforces continuous task execution through bundle-issued single-action Worker leases, immutable action recording, structured post-action questioning, executable end-turn routing, and evidence-based final delivery.
+description: Enforces continuous task execution through bundle-issued single-action Worker leases, immutable action recording, structured post-action questioning, executable end-turn routing, evidence-based final delivery, and reusable bundle freshness checks.
 compatibility: Designed for ChatGPT Skills with Python 3 execution, a model that follows bundle-emitted Worker instructions, authorized read access to the canonical GitHub repository, and a persistent project-record store. Bundled scripts use only the Python standard library.
 ---
 
@@ -27,22 +27,62 @@ Canonical paths:
 - `scripts/action_questioner.py`
 - `scripts/end_turn_router.py`
 
-At the start of each governed user turn, resolve `main` once to an exact commit SHA. Read every canonical file from that same SHA. Do not mix commits or substitute stale runtime, exported, forked, alternate-branch, or similarly named copies. Runtime artifacts never acquire canonical authority.
+Canonical construction authority is always an exact Git commit SHA. When construction or reconstruction is required, resolve `main` once to an exact commit SHA and read every canonical file from that same SHA. Do not mix commits or substitute stale runtime, exported, forked, alternate-branch, or similarly named copies. Runtime artifacts never acquire canonical authority.
+
+The Git tree SHA for `execution-continuity-control/` is the reusable-bundle freshness identity. It is not a substitute for the commit SHA used to construct a bundle. The commit SHA records exact provenance; the skill-tree SHA answers only whether the canonical skill subtree has changed.
 
 Before revising canon, read current `SKILL.md`, `DESIGN_HISTORY.md`, and affected resources from one current `main` SHA; preserve or explicitly supersede affected protected invariants; stage complete replacements; verify coherence; then move `main`.
 
+## Reusable bundle freshness gate
+
+A governed turn does **not** automatically require construction of a new runtime bundle.
+
+Before constructing a bundle, the caller MUST first attempt to resolve an existing reusable bundle candidate for this skill. The candidate may already exist in the live execution environment or may be held in a persistent derivative cache such as the ChatGPT Library and materialized into the execution environment. A cached or materialized bundle remains a runtime derivative and never becomes canonical source.
+
+Every newly constructed bundle MUST contain one machine-readable pin header before the canonical template content:
+
+```text
+# EXECUTION_CONTINUITY_PIN {"repository":"BestNameYet/Canonical-Skills-Location","branch":"main","commit_sha":"<40-hex commit>","skill_tree_sha":"<40-hex tree>"}
+```
+
+The header is runtime metadata. `commit_sha` identifies the canonical snapshot from which the bundle was constructed. `skill_tree_sha` is the Git tree object for the `execution-continuity-control/` directory at that commit.
+
+### First bootstrap after construction
+
+A bundle constructed from a just-resolved current `main` snapshot is already known to match the source used to build it. Its first `bootstrap` MUST proceed without performing a redundant freshness comparison against GitHub.
+
+### Later initialization of an existing bundle
+
+Before `bootstrap` of a previously constructed bundle, the caller MUST run the freshness gate:
+
+1. locate the reusable bundle candidate and read its `EXECUTION_CONTINUITY_PIN` header;
+2. reject the candidate as non-reusable if the header is missing, malformed, or identifies another repository/branch/root;
+3. resolve current `main` once to its exact commit SHA;
+4. resolve from that commit the current Git tree SHA for `execution-continuity-control/`;
+5. compare the current skill-tree SHA with the candidate's stored `skill_tree_sha`;
+6. if they are equal, reuse the existing bundle and invoke its `bootstrap`; do **not** retrieve all canonical files and do **not** reconstruct the bundle merely because the repository commit SHA changed;
+7. if they differ, or if the candidate is missing or invalid, the candidate grants no execution authority for the new turn; construct a new bundle from the current resolved commit and current skill-tree SHA, then invoke that new bundle's first `bootstrap` without another freshness comparison.
+
+An equal skill-tree SHA means the entire canonical `execution-continuity-control/` subtree is byte-for-byte the same Git tree even if unrelated repository content has changed. A different skill-tree SHA means at least one canonical item in the subtree changed and therefore invalidates reuse.
+
+If a persistent cache is available, persist the exact constructed bundle there so it can survive runtime reallocation. When execution requires a local file, materialize that cached derivative to the execution environment rather than reconstructing it. If only `/mnt/data` is available, reuse is possible only while that runtime artifact survives.
+
 ## Executable runtime bundle
 
-Retrieval of `SKILL.md` is a bootstrap event, not sufficient by itself to begin governed execution. The caller MUST:
+Retrieval of `SKILL.md` is a bootstrap-discovery event, not sufficient by itself to begin governed execution. Bundle construction occurs only when the freshness gate finds no valid reusable bundle.
 
-1. pin current `main` once for the turn;
-2. retrieve every canonical path above from that SHA;
+When construction is required, the caller MUST:
+
+1. use the current `main` commit and `execution-continuity-control/` skill-tree SHA already resolved by the freshness/rebuild decision;
+2. retrieve every canonical path above from that exact commit SHA;
 3. build one manifest conforming to `schemas/runtime-bundle.schema.json` with `bundle_format = execution-continuity-runtime-bundle/v2`;
 4. preserve canonical root-relative paths;
 5. UTF-8 JSON serialize and base64-encode the manifest;
 6. replace the one `__EXECUTION_CONTINUITY_BUNDLE_PAYLOAD_B64__` sentinel in the pinned `scripts/runtime_bundle.py` with that payload;
-7. write exactly one `/mnt/data/execution-continuity-control_bundle_[timestamp].py`, where `[timestamp]` is sortable UTC `YYYYMMDDTHHMMSSffffffZ`; and
-8. invoke it with `bootstrap`.
+7. prepend exactly one `EXECUTION_CONTINUITY_PIN` header containing the construction commit SHA and skill-tree SHA;
+8. write exactly one `/mnt/data/execution-continuity-control_bundle_[timestamp].py`, where `[timestamp]` is sortable UTC `YYYYMMDDTHHMMSSffffffZ`;
+9. when a persistent derivative cache is available, persist that exact constructed bundle for later reuse; and
+10. invoke the newly constructed bundle with `bootstrap` without rechecking the pin that was just used to construct it.
 
 The embedded tree is:
 
@@ -181,11 +221,12 @@ All governed routing is Worker-scoped because the bundle itself is the Orchestra
 
 ## Required governed-turn cycle
 
-1. Pin one canonical commit; retrieve all canonical paths; construct the executable bundle; invoke `bootstrap`.
-2. Supply the unchanged user prompt when requested.
-3. Bundle issues one `TASK_ACTION` lease.
-4. Worker performs exactly one material action and returns with that lease's `action_id`.
-5. Bundle consumes it, invokes recorder, and issues `CONTINUITY_RESPONSE` leases until questioning/routing completes.
-6. Nonterminal completion or `CONTINUE` → exactly one new `TASK_ACTION`; repeat.
-7. `COMPLETE` or `IMPASSE` → after terminal persistence, exactly one `FINAL_RESPONSE` lease.
-8. Worker uses only that payload for UI delivery and appropriate file exposure; no further cycle follows.
+1. Resolve a reusable bundle candidate. If one exists from an earlier initialization, resolve current `main` and the current `execution-continuity-control/` tree SHA and run the freshness comparison before `bootstrap`.
+2. Equal skill-tree SHA → reuse the existing bundle. Missing/invalid/mismatched candidate → retrieve all canonical paths from the current commit, construct one new pinned bundle, optionally persist its exact derivative cache copy, and bootstrap it without a redundant immediate freshness check.
+3. Supply the unchanged user prompt when requested.
+4. Bundle issues one `TASK_ACTION` lease.
+5. Worker performs exactly one material action and returns with that lease's `action_id`.
+6. Bundle consumes it, invokes recorder, and issues `CONTINUITY_RESPONSE` leases until questioning/routing completes.
+7. Nonterminal completion or `CONTINUE` → exactly one new `TASK_ACTION`; repeat.
+8. `COMPLETE` or `IMPASSE` → after terminal persistence, exactly one `FINAL_RESPONSE` lease.
+9. Worker uses only that payload for UI delivery and appropriate file exposure; no further cycle follows.
