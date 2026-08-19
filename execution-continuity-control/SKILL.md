@@ -1,59 +1,148 @@
 ---
 name: execution-continuity-control
-description: Enforces continuous task execution through a single generated runtime bundle that owns prompt intake, post-action recording, questioning, end-turn routing, and Worker authorization.
-compatibility: Designed for ChatGPT Skills with GitHub artifact access, interactive Python 3 execution, and writable `/mnt/data` storage.
+description: Enforce execution continuity by routing each material action through a single bundle-owned state machine, recording execution evidence, and preventing premature end-of-turn behavior.
 ---
 
 # Execution Continuity Control
 
-Canonical repository: `BestNameYet/Canonical-Skills-Location`  
-Canonical branch: `main`  
-Bundle pointer: repository-root `execution-continuity-bundle.json`
+This skill is the canonical entry point for execution continuity. The runtime is `bundle.py` in this directory.
 
-For every governed invocation:
+## Runtime authority
 
-1. Resolve current `main` and fetch the current repository-root `execution-continuity-bundle.json` from that exact revision.
-2. Read its `artifact_id`, `bundle_filename`, `bundle_sha256`, and source provenance.
-3. Download that GitHub Actions artifact and extract the single file named by `bundle_filename` directly into `/mnt/data` as `/mnt/data/bundle.py`. Do not create a bundle-specific directory. Downloading or extracting the file does not invoke it; the file remains inert until explicitly executed.
-4. Verify `/mnt/data/bundle.py` SHA-256 against `bundle_sha256`.
-5. **First-invocation special case:** before any bundle payload exists, explicitly invoke `/mnt/data/bundle.py` and provide exactly one UTF-8 JSON object serialized on one stdin line. Two initialization forms are valid:
+- `bundle.py` is the sole Orchestrator.
+- The model acts only as the Worker under a current bundle-issued payload.
+- No current payload means no execution authority.
+- `TASK_ACTION` authorizes exactly one material task action.
+- `FINAL_RESPONSE` authorizes only construction and delivery of the final user-facing response.
+- After each authorized material action completes, fails, or reaches an attempted stop point, return the complete prior payload unchanged to the same bundle before any further material task action.
+- Bundle protocol questions grant no substantive task authority.
 
-   Default verbatim intake uses exactly these three fields:
+## Initialization
 
-```json
-{"schema":"execution-continuity-initialization-v1","type":"INITIALIZE","user_prompt":"<verbatim current user prompt>"}
-```
-
-   Optional semantic preprocessing uses exactly the same object plus the single field `"preprocessor": true`:
+Invoke `bundle.py` with one JSON line:
 
 ```json
-{"schema":"execution-continuity-initialization-v1","type":"INITIALIZE","user_prompt":"<verbatim current user prompt>","preprocessor":true}
+{"schema":"execution-continuity-initialization-v1","type":"INITIALIZE","user_prompt":"<exact user prompt>"}
 ```
 
-   `schema` must equal `execution-continuity-initialization-v1`; `type` must equal `INITIALIZE`; `user_prompt` must be the complete current user prompt verbatim as a non-empty JSON string. If `preprocessor` is present, its value must be the JSON boolean `true`; `false`, any non-boolean value, or any other additional field is invalid. Do not reinterpret, summarize, or pre-process `user_prompt` before this handoff. JSON escaping required to serialize the verbatim prompt does not count as modification.
-6. Receipt of a valid initialization object is the bundle's invocation and the state-machine transition from inert to active. Before receipt, the bundle has no governed-turn state and exercises no control over the Worker. After receipt, the bundle owns control of the Worker for the governed turn.
-7. On initialization the bundle preserves the exact `user_prompt` as `original_user_prompt` in bundle-owned state. When `preprocessor` is omitted, the bundle sets `task_prompt` to `original_user_prompt` verbatim. When `preprocessor` is `true`, the bundle enters its optional `prompt-preprocessor-v2` branch before issuing any `TASK_ACTION`.
-8. In `prompt-preprocessor-v2`, the bundle uses the Worker only as a semantic engine and keeps `original_user_prompt` as the authoritative text object. The bundle first requests a source-anchored contextual map whose semantic items and relations are tied to exact source substrings and occurrences. It then requests a semantic-attention map that marks semantic fragility, rewrite freedom, protected features, and protected relationships; higher attention means lower rewrite freedom. The Worker next proposes only bounded source-relative replacement edits for clarification, grammar normalization, syntactic simplification, structure separation, or source-determined disambiguation. The bundle deterministically validates anchors, overlap, declared semantic intersections, and LOCKED spans, then mechanically applies accepted patches to the original text. It independently remaps the candidate without supplying the original map, requests explicit item/relation alignment between the two maps, and accepts the candidate only when every source semantic item and relation is equivalent and there are no added semantic items, added relations, or other semantic changes. Execution planning occurs only after semantic equivalence succeeds and is stored separately from `task_prompt`; the execution plan may select operational methods but is never used to reconstruct or rewrite the governing task text. Material ambiguity, candidate ambiguity, protocol failure, or failed equivalence audit causes deterministic fallback to `original_user_prompt`; preprocessing failure does not itself fail the user's task.
-9. Model-facing questionnaire choices must be self-describing at the point of presentation. Whenever an enumerated value or type/subtype choice is requested, present the enum token together with its natural-language meaning in the same question text or payload. The Worker must not be required to infer an answer domain from hidden validator state.
-10. When prompt intake is complete, the bundle emits the first complete control payload. Every control payload must expose the governing `task_prompt` to the Worker. A `TASK_ACTION` payload pairs that `task_prompt` with one `command` authorizing exactly one material next action toward achieving it. When semantic preprocessing is accepted, the first command is the first dependency-valid action from the separately derived execution plan. The Worker follows `task_prompt` for the turn and executes only the currently authorized `command`.
-11. Treat the payload's `state` as opaque bundle-owned continuation state. Do not extract, rewrite, reconstruct, summarize, or separately persist it. The exposed `task_prompt` and `command` are model-facing control fields, not permission to modify opaque state.
-12. After the authorized material action completes, fails, or reaches an attempted end-of-turn stop point, re-invoke the same `/mnt/data/bundle.py` and return the entire prior payload unchanged as the first JSON input line.
-13. The running bundle then owns recorder/questioner/router processing. Answer each emitted protocol question directly on the process input using the requested answer format. Protocol answering does not authorize substantive task work.
-14. Continue until the bundle emits another complete payload. `TASK_ACTION` authorizes exactly one next material action toward the same governing `task_prompt`. `FINAL_RESPONSE` authorizes only construction and delivery of the final user-facing response satisfying `task_prompt`, after which the turn ends without another bundle cycle.
-15. Runtime execution records are written directly into `/mnt/data` using the canonical `execution-record_<timestamp>.json` filename. Do not create or use a recorder-specific subdirectory.
+When the user explicitly requests preprocessing, add:
 
-The default initialization state transition is:
+```json
+"preprocessor": true
+```
 
-`INERT -> receive valid INITIALIZE object -> preserve original_user_prompt -> set task_prompt = original_user_prompt -> emit first TASK_ACTION -> payload-return state-machine loop -> FINAL_RESPONSE`
+The bundle owns the resulting state, action routing, execution record, and end-turn decision.
 
-The optional preprocessing transition is:
+## Prompt preprocessing
 
-`INERT -> receive valid INITIALIZE object with preprocessor=true -> preserve original_user_prompt -> prompt-preprocessor-v2 source context map -> semantic-attention map -> constrained source-relative edit proposals -> deterministic patching -> independent candidate context remap -> item/relation equivalence audit -> accept revised task_prompt or fall back to original_user_prompt -> derive separate execution plan -> emit first TASK_ACTION -> payload-return state-machine loop -> FINAL_RESPONSE`
+Preprocessing is opt-in only. When requested, the bundle uses the source-anchored semantic-edit protocol rather than regenerating a prompt from an execution plan.
 
-Before the first bundle invocation there is no payload; only canonical retrieval, artifact download, extraction, hash verification, and delivery of one valid initialization object are authorized bootstrap activity. After the initialization object is accepted:
+The preprocessor:
 
-`NO CURRENT PAYLOAD = NO EXECUTION AUTHORITY.`
+1. builds a source-anchored contextual map of the exact user prompt;
+2. builds a semantic-attention map identifying fragile meaning-bearing features and their permitted rewrite freedom;
+3. asks for bounded source-relative edits only;
+4. mechanically applies accepted edits to the original text;
+5. independently remaps the candidate text;
+6. compares source and candidate maps for semantic equivalence;
+7. derives the execution plan only after the candidate task prompt has passed equivalence.
 
-The canonical runtime implementation is one file: `execution-continuity-control/bundle.py`. Recorder, prompt-intake/preprocessor, action-questioner, and end-turn-router logic are ordinary functions inside that file. There are no model-facing child scripts, subprocess bridges, `sys.argv` shims, or textual main-guard stripping mechanisms.
+Execution strategy is therefore separate from task semantics. Execution-plan actions may determine the first `TASK_ACTION`, but they may not be recompiled into `task_prompt`.
 
-Always acquire the artifact referenced by the current pointer before governed execution. Do not reconstruct the runtime from historical child scripts or stale local copies.
+### Source context map
+
+Each semantic item is anchored to an exact source span and records its kind, normalized meaning, semantic features, and relationships. Semantic features include, where applicable:
+
+- referent;
+- scope;
+- cardinality;
+- modality;
+- polarity;
+- conditionality;
+- ordering;
+- attachment;
+- comparison structure;
+- other meaning-bearing distinctions.
+
+Relationships are also first-class map objects. The map therefore preserves not merely salient words but semantic edges such as modifier attachment, comparison dimensions, and whether/how relationships.
+
+### Semantic-attention map
+
+Attention is explicit semantic salience/fragility metadata, not hidden transformer attention. Each mapped semantic item receives:
+
+- an attention level (`CRITICAL`, `HIGH`, `MEDIUM`, or `LOW`);
+- a rewrite class (`LOCKED`, `SEMANTICALLY_LOCKED`, `STRUCTURALLY_MOVABLE`, `COMPRESSIBLE`, `EXPANDABLE`, or `STYLE_FREE`);
+- protected semantic features;
+- a short reason.
+
+Higher semantic attention implies lower rewrite freedom.
+
+### Constrained edits
+
+The semantic engine proposes source-relative edit operations rather than a complete regenerated prompt. Supported operations are:
+
+- `REPLACE`;
+- `DELETE`;
+- `INSERT_BEFORE`;
+- `INSERT_AFTER`.
+
+Each edit identifies an exact source anchor, replacement text, purpose, affected semantic items, and whether it adds a semantic requirement.
+
+The deterministic patcher rejects edits that:
+
+- do not resolve to the claimed source anchor;
+- overlap;
+- violate a locked span;
+- alter a protected semantic feature;
+- add a semantic requirement without source entailment;
+- otherwise violate the attention map.
+
+Unedited text is inherited directly from the original prompt.
+
+### Independent remapping and equivalence
+
+After patching, the candidate is independently remapped. The final semantic audit compares the source and candidate maps and reports:
+
+- missing semantic items;
+- added semantic items;
+- changed semantic features;
+- changed relationships;
+- other semantic changes.
+
+Any material difference causes fallback to the exact original prompt. The audit is a safety boundary, not a mechanism for promoting execution strategy into user requirements.
+
+### Material ambiguity
+
+If the source context map identifies a material ambiguity, the preprocessor falls back to the exact original prompt rather than inventing a resolution. Candidate-side material ambiguity likewise causes fallback.
+
+### Failure behavior
+
+Any preprocessing protocol error or failed semantic audit falls back to the exact original user prompt. Preprocessing failure never grants authority to execute a reconstructed approximation.
+
+## Execution record
+
+The bundle owns the append-only execution record. Material actions are followed by the action questionnaire and recorded with observable evidence. End-of-turn attempts additionally run the router before the bundle may issue `FINAL_RESPONSE`.
+
+The execution record is evidence of execution state, not a substitute for execution.
+
+## End-turn control
+
+A Worker end-turn attempt is only a signal to invoke bundle end-turn control. It does not itself end the turn.
+
+The bundle's router may return:
+
+- `CONTINUE` — further material execution is required;
+- `COMPLETE` — requested work is complete;
+- `IMPASSE` — no legitimate continuation path remains.
+
+Only `COMPLETE` or `IMPASSE` can lead to `FINAL_RESPONSE`.
+
+## Canonicality and runtime freshness
+
+Canonical authority comes from this repository location. Runtime copies and generated artifacts have no independent canonical authority.
+
+A materialized runtime should be checked against the canonical source identity before reuse. When the canonical source changes, materialize the current bundle rather than relying on a stale runtime copy.
+
+## Design rationale
+
+See `DESIGN_HISTORY.md` for the architectural history and the reasons behind the current control boundaries, including the separation between semantic task preservation and execution planning.
