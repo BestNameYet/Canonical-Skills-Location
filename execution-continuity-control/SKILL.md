@@ -1,6 +1,6 @@
 ---
 name: execution-continuity-control
-description: Enforces continuous task execution through a bundle-controlled Orchestrator/Worker loop, immutable action recording, a structured decision-engineering action questionnaire, and executable end-turn routing.
+description: Enforces continuous task execution through a bundle-controlled Orchestrator/Worker loop, immutable action recording, structured post-action questioning, executable end-turn routing, and a post-Orchestrator final-delivery packet.
 compatibility: Designed for ChatGPT Skills with Python 3 execution, an Orchestrator/Worker execution model, authorized read access to the canonical GitHub repository, and a persistent project-record store. Bundled scripts use only the Python standard library.
 ---
 
@@ -94,7 +94,7 @@ The timestamped bundle and its derivative tree are noncanonical representations 
 
 The bundle itself establishes orchestration control. Its initial `bootstrap` invocation MUST NOT immediately hand the task to a Worker.
 
-### Phase 1 — request the user prompt
+### Phase 1 — capture the user prompt
 
 After verifying/materializing its embedded snapshot, `bootstrap` creates bundle-local orchestration control state and returns `REQUEST_USER_PROMPT`.
 
@@ -102,7 +102,7 @@ The caller supplies the complete current user prompt unchanged through:
 
 `provide-prompt --user-prompt <complete user prompt>`
 
-The bundle stores that prompt as immutable task payload for the orchestration session. Subsequent Worker commands reference this captured prompt rather than reconstructing it from memory.
+The bundle stores that prompt as immutable task payload for the orchestration session. Subsequent Worker and final-delivery commands reference this captured prompt rather than reconstructing it from memory.
 
 ### Phase 2 — establish Orchestrator identity
 
@@ -110,17 +110,9 @@ After the prompt is captured, the bundle returns `ORCHESTRATOR_IDENTITY_CHECK` a
 
 `Is the model operating as the Orchestrator defined as: [canonical definition]? Answer YES or NO.`
 
-The canonical runtime definition is the `ORCHESTRATOR_DEFINITION` constant in `scripts/runtime_bundle.py`. It defines the Orchestrator as the highest-scope, task-domain-neutral controller that:
+The canonical runtime definition is the `ORCHESTRATOR_DEFINITION` constant in `scripts/runtime_bundle.py`. The Orchestrator is the highest-scope, task-domain-neutral controller. It does not independently solve the substantive task; it preserves the captured prompt as Worker payload, directs one Worker material action at a time, invokes the bundle after every completed material action, routes continuity questions from observable execution state, intercepts Worker stop attempts, and owns the actual user-facing turn boundary.
 
-- does not independently solve, critique, reinterpret, or form task-domain opinions;
-- preserves the captured user prompt as Worker payload;
-- directs a Worker to perform one material action at a time;
-- invokes the executable bundle immediately after every completed material action;
-- routes recorder, questioner, and router interactions from observable execution state;
-- intercepts every Worker stop attempt; and
-- owns the actual user-facing turn boundary.
-
-Worker `COMPLETE` or `IMPASSE` ends only the Worker lifecycle. Only an Orchestrator-scoped end-turn cycle returning `COMPLETE` after its `end_turn_result` is persisted authorizes the user-facing turn to end.
+Worker `COMPLETE` or `IMPASSE` ends only the Worker lifecycle. Actual user-facing delivery is possible only after the Orchestrator's own recorded end-turn cycle reaches persisted outer `COMPLETE`.
 
 The caller answers through:
 
@@ -132,12 +124,12 @@ The caller answers through:
 
 A confirmed `YES` returns `ORCHESTRATE_WORKER` containing:
 
-- the previously captured user prompt;
+- the captured user prompt;
 - a command to direct the Worker to perform the next required material action;
 - the canonical orchestration rule list from `scripts/runtime_bundle.py`; and
 - the mandatory next bundle call after that action completes.
 
-`ORCHESTRATE_WORKER` is a control instruction addressed to the Orchestrator, not an optional recommendation. The Worker is permitted exactly one next material action before control returns to the bundle.
+`ORCHESTRATE_WORKER` is a control instruction addressed to the Orchestrator. The Worker is permitted exactly one next material action before control returns to the bundle.
 
 ## Orchestrator/Worker execution architecture
 
@@ -145,11 +137,11 @@ A confirmed `YES` returns `ORCHESTRATE_WORKER` containing:
 
 The Orchestrator is the highest-scope controller and is continuity-governed by the executable bundle. It treats the captured user prompt as payload for the Worker and does not independently perform the substantive task.
 
-It invokes the bundle, routes the bundle's protocol questions and answers, directs the Worker, intercepts Worker stop attempts, and owns the actual user-facing turn boundary.
+It invokes the bundle, routes bundle protocol questions and answers, directs the Worker, intercepts Worker stop attempts, performs its own finalization action after a terminal Worker result, and owns the actual user-facing turn boundary.
 
 ### Worker
 
-The Worker performs substantive reasoning, tool use, artifact work, validation, and remediation toward the captured user prompt.
+The Worker performs substantive reasoning, tool use, artifact work, validation, remediation, and deliverable creation toward the captured user prompt.
 
 The Worker does not own user-facing `END_TURN`. It performs one material action under each `ORCHESTRATE_WORKER` command and then returns lifecycle control to the Orchestrator.
 
@@ -169,7 +161,9 @@ Immediately after every completed Worker material action, the Orchestrator invok
 
 `after-action --scope worker`
 
-On the first post-action invocation, the caller also supplies the recorder's configured persistence parameters required by the current environment, including `--output-dir`, `--state-dir`, and `--record-id`, plus `--record` and `--record-name` when a predecessor has been materialized. The bundle retains the latest local recorder receipt for later cycle calls.
+On the first post-action invocation, the caller also supplies the recorder persistence parameters required by the current environment: `--output-dir`, `--state-dir`, and `--record-id`, plus `--record` and `--record-name` when a predecessor snapshot has been materialized.
+
+At that first append, the bundle records the predecessor's action count as `turn_prior_action_count`. The final-delivery phase later uses that value to derive a mechanical `current_turn_action_range`; actions before that range are prior project history and actions within the range are the current governed turn.
 
 The bundle then:
 
@@ -187,23 +181,67 @@ The bundle invokes the embedded questioner with that answer. While the questione
 
 The model does not directly invoke recorder, questioner, or router commands in governed execution.
 
-## Automatic re-orchestration after each action
+## Automatic re-orchestration after each Worker action
 
 When a Worker-scoped action questionnaire completes with no end-turn attempt, the bundle immediately returns another `ORCHESTRATE_WORKER` command.
 
 When the Worker-scoped router returns `CONTINUE`, the bundle immediately returns `ORCHESTRATE_WORKER`, including the router continuation instruction when present.
 
-Thus the next Worker action is always issued by the bundle-controlled Orchestrator loop after the prior action's continuity cycle has completed. The Orchestrator does not independently decide to let the Worker free-run across multiple actions.
+Thus the next Worker action is always issued only after the preceding action's continuity cycle has completed.
 
-When a Worker-scoped router returns `COMPLETE` or `IMPASSE`, the bundle returns `WORKER_TERMINAL_TO_ORCHESTRATOR`. This ends only the Worker lifecycle.
+## Worker terminal transition and mandatory Orchestrator finalization
 
-If substantive work remains, the Orchestrator may invoke `resume-worker`, which returns a new `ORCHESTRATE_WORKER` command.
+When a Worker-scoped router returns `COMPLETE` or `IMPASSE`, the bundle returns `WORKER_TERMINAL_TO_ORCHESTRATOR` and stores the Worker terminal directive.
 
-If the Orchestrator proposes actual user-facing termination, that proposal is itself a material Orchestrator action and MUST be routed through:
+This is a mandatory lifecycle transition, not final UI delivery. Before any Worker resumption or final response, the Orchestrator MUST perform its own terminal/finalization action and route that action through:
 
 `after-action --scope orchestrator`
 
-Only a persisted outer `COMPLETE` causes the bundle to return `TURN_END_AUTHORIZED`. Outer `CONTINUE` resumes required work. Outer `IMPASSE` returns `TURN_END_PROHIBITED` and does not authorize user-facing termination.
+The Orchestrator therefore undergoes its own recorder invocation, structured action questionnaire, and end-turn router cycle before receiving any final-response construction input.
+
+The outer result governs what follows:
+
+- outer `CONTINUE` → the bundle resumes required work by returning `ORCHESTRATE_WORKER`, including any continuation instruction;
+- outer `IMPASSE` → the bundle returns `TURN_END_PROHIBITED`; no final-delivery packet is issued and user-facing termination remains prohibited;
+- outer `COMPLETE` → after the Orchestrator `end_turn_result` is persisted, the bundle enters the final-delivery phase and returns `FINAL_DELIVERY_TO_ORCHESTRATOR`.
+
+A Worker terminal result alone never exposes the execution record or final-response heuristic to the Orchestrator. Those are supplied only after the Orchestrator has completed its own recorded end-turn process and outer `COMPLETE` has been persisted.
+
+## Final-delivery packet
+
+`FINAL_DELIVERY_TO_ORCHESTRATOR` is the authorized terminal delivery input. It replaces a bare `TURN_END_AUTHORIZED` signal.
+
+The packet contains:
+
+1. `user_prompt` — the exact prompt captured at bootstrap;
+2. `worker_terminal_directive` — the final Worker `COMPLETE` or `IMPASSE` result that returned lifecycle control to the Orchestrator;
+3. `orchestrator_terminal_directive = COMPLETE`;
+4. `latest_execution_record` — the newest recorder snapshot known after the Orchestrator's own `end_turn_result` append, including:
+   - pathname;
+   - filename;
+   - record ID;
+   - complete JSON content; and
+   - `current_turn_action_range` with the first and last sequence numbers belonging to the governed turn when mechanically resolvable;
+5. `narrative_heuristic` — the fixed canonical description from `FINAL_NARRATIVE_HEURISTIC` in `scripts/runtime_bundle.py`;
+6. `instruction_to_orchestrator` — a mandatory instruction to construct and output the user-facing response to the UI from the captured prompt, record, and heuristic; and
+7. `file_exposure_instruction` — a mandatory instruction to expose Worker-created deliverable files and other user-relevant files when appropriate and available.
+
+The canonical narrative heuristic requires the Orchestrator to:
+
+- treat the captured user prompt as the requested end state;
+- treat `current_turn_action_range` as the primary current-turn execution history;
+- use earlier record actions only as relative prior history when they establish dependencies, inherited state, earlier constraints, or changes needed to understand the current outcome;
+- summarize the material action path and evidence-backed outcome for the prompt rather than replaying all bookkeeping;
+- state achieved, partial, blocked, or unresolved user-intent components using the newest relevant evidence;
+- prefer newer supported state over stale conflicting history;
+- never turn plans, intentions, questionnaire self-report, or unsupported claims into accomplishments;
+- never invent unrecorded actions or evidence;
+- include material limitations, remaining gaps, or impasse causes when relevant; and
+- expose actual deliverable/supporting files when useful while suppressing internal continuity runtime/control/questionnaire/record files unless requested or necessary as evidence.
+
+The final UI response is an **authorized terminal delivery action**. It is intentionally not routed through another continuity questionnaire, because the Orchestrator's end-turn action was already recorded/questioned/routed immediately before the final-delivery packet. Re-questioning the final UI response would create an infinite terminal recursion.
+
+Only `FINAL_DELIVERY_TO_ORCHESTRATOR` with `turn_end_authorized = true` authorizes the Orchestrator to produce the final user-facing response and end the turn.
 
 ## Action recording rule
 
@@ -213,7 +251,7 @@ For current-turn material work:
 
 The recorder is invoked after every material action through the bundle. The recorder does not classify the action; it records invocation, timestamps it, appends the invocation, and starts the action questioner.
 
-The questioner's atomic decomposition is representational only. It does not require the Worker to artificially segment execution into microscopic steps beyond the one-material-action control boundary.
+The questioner's atomic decomposition is representational only. It does not require microscopic segmentation beyond the one-material-action control boundary.
 
 Bundle, recorder, questioner, or router failure does not authorize stopping or alter a router directive. Preserve pending audit facts and remediate the control mechanism where possible.
 
@@ -307,16 +345,16 @@ The questioner wraps the router object as `end_turn_result` and returns it to th
 ### Worker scope
 
 - `CONTINUE` → bundle returns `ORCHESTRATE_WORKER` and resumes Worker execution.
-- `COMPLETE` → bundle returns `WORKER_TERMINAL_TO_ORCHESTRATOR`.
-- `IMPASSE` → bundle returns `WORKER_TERMINAL_TO_ORCHESTRATOR`.
+- `COMPLETE` → bundle returns `WORKER_TERMINAL_TO_ORCHESTRATOR` and requires Orchestrator finalization.
+- `IMPASSE` → bundle returns `WORKER_TERMINAL_TO_ORCHESTRATOR` and requires Orchestrator finalization.
 
 Worker terminal states never authorize user-facing `END_TURN`.
 
 ### Orchestrator scope
 
-- `CONTINUE` → bundle resumes required work, normally by returning `ORCHESTRATE_WORKER`.
-- `IMPASSE` → bundle returns `TURN_END_PROHIBITED`.
-- `COMPLETE` → bundle returns `TURN_END_AUTHORIZED` only after the `end_turn_result` is persisted.
+- `CONTINUE` → bundle resumes required Worker execution.
+- `IMPASSE` → bundle returns `TURN_END_PROHIBITED`; no final-delivery packet is supplied.
+- `COMPLETE` → after the Orchestrator `end_turn_result` is persisted, bundle returns `FINAL_DELIVERY_TO_ORCHESTRATOR` with `turn_end_authorized = true`.
 
 ## Required governed-turn cycle
 
@@ -328,8 +366,9 @@ Worker terminal states never authorize user-facing `END_TURN`.
 6. Immediately after that action, Orchestrator invokes bundle `after-action --scope worker` before another Worker action.
 7. Bundle invokes recorder and returns `CONTINUITY_QUESTION`; Orchestrator repeatedly answers via `continuity-answer` until the questioner/router cycle terminates.
 8. Nonterminal Worker action or Worker `CONTINUE` → bundle returns the next `ORCHESTRATE_WORKER`; repeat from step 5.
-9. Worker `COMPLETE`/`IMPASSE` → bundle returns lifecycle control to Orchestrator.
-10. If work remains, `resume-worker` returns `ORCHESTRATE_WORKER`. If actual termination is proposed, route the Orchestrator stop action through `after-action --scope orchestrator` and its continuity cycle.
-11. Only `TURN_END_AUTHORIZED` permits actual user-facing termination.
+9. Worker `COMPLETE`/`IMPASSE` → bundle returns `WORKER_TERMINAL_TO_ORCHESTRATOR` and requires the Orchestrator's own finalization action.
+10. Orchestrator invokes `after-action --scope orchestrator` and completes its recorder/questioner/router cycle.
+11. Outer `CONTINUE` → Worker resumes. Outer `IMPASSE` → no turn end. Outer `COMPLETE` → bundle returns `FINAL_DELIVERY_TO_ORCHESTRATOR` containing the latest record, current-turn range, fixed narrative heuristic, and UI/file-delivery instructions.
+12. Orchestrator applies that packet to produce the final user-facing response, exposes appropriate Worker-created/user-relevant files, and ends the turn without another continuity cycle.
 
 Do not expose router internals or audit bookkeeping to the user unless doing so is useful to the requested task.
