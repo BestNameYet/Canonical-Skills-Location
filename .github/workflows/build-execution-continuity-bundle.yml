@@ -33,7 +33,7 @@ jobs:
           echo "commit_sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
           echo "skill_tree_sha=${SKILL_TREE_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Build bundle manifest
+      - name: Build single-file bundle
         shell: bash
         env:
           COMMIT_SHA: ${{ steps.ids.outputs.commit_sha }}
@@ -41,71 +41,40 @@ jobs:
         run: |
           set -euo pipefail
 
-          cat > execution-continuity-control/BUNDLE_SOURCE.json <<EOF
-          {
-            "repository": "${GITHUB_REPOSITORY}",
-            "branch": "${GITHUB_REF_NAME}",
-            "commit_sha": "${COMMIT_SHA}",
-            "skill_tree_sha": "${SKILL_TREE_SHA}"
-          }
-          EOF
+          mkdir -p dist
 
-      - name: Create deterministic ZIP
+          python3 execution-continuity-control/scripts/build_bundle.py \
+            --source-root execution-continuity-control \
+            --output dist/bundle.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --branch "${GITHUB_REF_NAME}" \
+            --commit-sha "${COMMIT_SHA}" \
+            --skill-tree-sha "${SKILL_TREE_SHA}"
+
+      - name: Validate generated bundle
         shell: bash
-        env:
-          COMMIT_SHA: ${{ steps.ids.outputs.commit_sha }}
         run: |
           set -euo pipefail
 
-          python3 - <<'PY'
-          import os
-          import zipfile
-          from pathlib import Path
+          test -s dist/bundle.py
+          python3 -m py_compile dist/bundle.py
 
-          root = Path("execution-continuity-control")
-          commit = os.environ["COMMIT_SHA"]
-          output = Path(
-              f"execution-continuity-control_bundle_{commit}.zip"
-          )
+          if grep -Eq '_CORE_GZIP_B64|PAYLOAD_B64|base64\.b64decode|gzip\.decompress|\bexec\(|\bcompile\(' dist/bundle.py; then
+            echo "Generated bundle contains forbidden runtime encoding or dynamic-code machinery."
+            exit 1
+          fi
 
-          files = sorted(
-              p for p in root.rglob("*")
-              if p.is_file()
-          )
+          python3 dist/bundle.py --self-test
 
-          with zipfile.ZipFile(
-              output,
-              "w",
-              compression=zipfile.ZIP_DEFLATED,
-              compresslevel=9,
-          ) as zf:
-              for path in files:
-                  info = zipfile.ZipInfo(
-                      path.as_posix(),
-                      date_time=(1980, 1, 1, 0, 0, 0),
-                  )
-                  info.compress_type = zipfile.ZIP_DEFLATED
-                  info.external_attr = 0o100644 << 16
-                  zf.writestr(info, path.read_bytes())
-
-          print(output)
-          PY
-
-          ARCHIVE="execution-continuity-control_bundle_${COMMIT_SHA}.zip"
-
-          sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
-
-          ls -lh "$ARCHIVE" "${ARCHIVE}.sha256"
-          cat "${ARCHIVE}.sha256"
+          sha256sum dist/bundle.py > dist/bundle.py.sha256
+          cat dist/bundle.py.sha256
 
       - name: Upload canonical bundle artifact
         id: upload_bundle
         uses: actions/upload-artifact@v4
         with:
           name: execution-continuity-control-${{ steps.ids.outputs.skill_tree_sha }}
-          path: |
-            execution-continuity-control_bundle_${{ steps.ids.outputs.commit_sha }}.zip
-            execution-continuity-control_bundle_${{ steps.ids.outputs.commit_sha }}.zip.sha256
+          path: dist/bundle.py
           if-no-files-found: error
           retention-days: 90
           compression-level: 0
@@ -121,6 +90,8 @@ jobs:
         run: |
           set -euo pipefail
 
+          BUNDLE_SHA256="$(cut -d ' ' -f1 dist/bundle.py.sha256)"
+
           cat > execution-continuity-bundle.json <<EOF
           {
             "repository": "${GITHUB_REPOSITORY}",
@@ -129,6 +100,8 @@ jobs:
             "artifact_id": "${ARTIFACT_ID}",
             "artifact_url": "${ARTIFACT_URL}",
             "artifact_digest": "${ARTIFACT_DIGEST}",
+            "bundle_filename": "bundle.py",
+            "bundle_sha256": "${BUNDLE_SHA256}",
             "commit_sha": "${COMMIT_SHA}",
             "skill_tree_sha": "${SKILL_TREE_SHA}"
           }
