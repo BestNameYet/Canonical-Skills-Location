@@ -25,6 +25,7 @@ Canonical paths:
 - `SKILL.md`
 - `DESIGN_HISTORY.md`
 - `schemas/execution-record.schema.json`
+- `schemas/runtime-bundle.schema.json`
 - `scripts/action_event_recorder.py`
 - `scripts/action_questioner.py`
 - `scripts/end_turn_router.py`
@@ -47,6 +48,51 @@ Before changing canon:
 8. commit and verify the coherent revision before moving `main` to it.
 
 A staging branch has no canonical authority until its revision is reachable from `main`.
+
+## Runtime bootstrap bundle
+
+Retrieval of canonical `SKILL.md` is a bootstrap event, not sufficient by itself to begin governed execution. The caller MUST materialize one complete local runtime bundle before the Worker performs governed substantive work.
+
+After `SKILL.md` is retrieved:
+
+1. resolve `main` HEAD exactly once for the turn and pin that commit SHA;
+2. retrieve every canonical path listed in this `SKILL.md` from that exact SHA, including `SKILL.md` itself;
+3. assemble those exact retrieved contents into one JSON document conforming to `schemas/runtime-bundle.schema.json`;
+4. preserve each file's canonical root-relative path in the bundle rather than flattening filenames;
+5. write exactly one timestamped bundle instance to the local execution environment as `/mnt/data/execution-continuity-control_bundle_[timestamp].json`, where `[timestamp]` is sortable UTC `YYYYMMDDTHHMMSSffffffZ`;
+6. verify that the written bundle identifies the pinned repository, branch, commit SHA, canonical root, and every required file with its Git blob SHA and exact UTF-8 content;
+7. use that verified local bundle as the sole local source snapshot for all continuity runtime derivation during the remainder of the governed turn.
+
+The bundle's internal canonical tree is:
+
+```text
+execution-continuity-control/
+├── SKILL.md
+├── DESIGN_HISTORY.md
+├── schemas/
+│   ├── execution-record.schema.json
+│   └── runtime-bundle.schema.json
+└── scripts/
+    ├── action_event_recorder.py
+    ├── action_questioner.py
+    └── end_turn_router.py
+```
+
+The corresponding bundle file paths are exactly:
+
+- `SKILL.md`
+- `DESIGN_HISTORY.md`
+- `schemas/execution-record.schema.json`
+- `schemas/runtime-bundle.schema.json`
+- `scripts/action_event_recorder.py`
+- `scripts/action_questioner.py`
+- `scripts/end_turn_router.py`
+
+The timestamped bundle is a noncanonical local representation of one canonical Git commit snapshot. It never acquires canonical authority and must not be persisted back as canonical source.
+
+After the bundle is written and verified, do not fetch a different canonical revision for runtime use during that turn. If additional reads are needed to inspect the pinned revision, they must use the already-pinned commit SHA and must not replace bundle content. No Runnable may be constructed from a later GitHub read when a verified bundle exists.
+
+Failure to materialize or verify the bundle does not convert a partial retrieval into a valid runtime snapshot. Preserve the pinned SHA and pending bootstrap state and remediate the materialization failure before continuity scripts are required.
 
 ## Execution architecture
 
@@ -88,7 +134,7 @@ Before every append, re-resolve the latest matching snapshot from the configured
 
 Each successor copies every predecessor action unchanged and in order, links to the predecessor filename and SHA-256, and appends exactly one new action object. Corrections are later actions; historical persisted snapshots are never rewritten.
 
-The canonical machine-readable contract is `schemas/execution-record.schema.json` from the canonical turn snapshot.
+The canonical machine-readable contract is `schemas/execution-record.schema.json` from the canonical turn snapshot and therefore from the verified runtime bundle.
 
 The record is one chronological `actions` stream with three action types:
 
@@ -98,11 +144,28 @@ The record is one chronological `actions` stream with three action types:
 
 There is no parallel router-history collection and no blank or prospective router placeholder. An `end_turn_result` exists only after a router cycle actually occurs.
 
-## Runtime executables
+## Runtime bundle to Runnable derivation
 
-Canonical scripts are source; local executable copies are noncanonical Runnables.
+Canonical scripts are source; the timestamped runtime bundle is the sole local representation of the pinned canonical snapshot; executable files emitted from it are noncanonical Runnables.
 
-Whenever a canonical script is required during a turn, copy its content from the canonical turn snapshot into the execution environment as a fresh file whose name includes `_run_[timestamp]`, then execute the newest valid Runnable derived from that same canonical script and turn snapshot. A Runnable never acquires canonical authority.
+Whenever a canonical script is required during a turn, extract its exact content from the verified bundle using its root-relative path and emit it beneath one local timestamped derivative tree associated with that bundle:
+
+```text
+/mnt/data/execution-continuity-control_run_[bundle_timestamp]/
+├── SKILL.md
+├── DESIGN_HISTORY.md
+├── schemas/
+│   ├── execution-record.schema.json
+│   └── runtime-bundle.schema.json
+└── scripts/
+    ├── action_event_recorder.py
+    ├── action_questioner.py
+    └── end_turn_router.py
+```
+
+The derivative tree MUST preserve canonical subfolder notation. In particular, script identities are `scripts/action_event_recorder.py`, `scripts/action_questioner.py`, and `scripts/end_turn_router.py`, not flattened basenames detached from `scripts/`.
+
+All files emitted for that tree must come from the same verified bundle. Do not mix bundle instances, Git commits, later connector reads, stale runtime files, or independently copied script content. Execute the required Python pathname from the derivative tree. The bundle and every emitted derivative remain noncanonical and never supersede GitHub canon.
 
 ## Recorder
 
@@ -199,7 +262,7 @@ Canonical source: `scripts/end_turn_router.py`
 
 The router owns questionnaire traversal and classifies the current scope as `CONTINUE`, `COMPLETE`, or `IMPASSE`. The model supplies answers from observable state; it does not reconstruct or replace router branching in prose.
 
-The router has no execution-record write authority and no recorder reference. It is invoked only after the action questionnaire explicitly classified the activity as an end-turn attempt. When a cycle reaches a directive, the router produces two mandatory products from the same completed cycle:
+The router has no execution-record write authority and no recorder reference. It is invoked only after the action questionnaire explicitly classified the activity as an end-turn attempt. When a cycle reaches a directive, it produces two mandatory products from the same completed cycle:
 
 1. a control result — `CONTINUE`, `COMPLETE`, or `IMPASSE` — supplied back toward the model; and
 2. a formatted `router_cycle` audit data object containing cycle ID, scope, every reached router question and answer in order, the directive, and directive-specific instruction or impasse evidence where required.
@@ -228,15 +291,15 @@ Only outer Orchestrator `COMPLETE`, after its `end_turn_result` wrapper has been
 
 ## Required execution cycle
 
-1. Resolve one canonical turn snapshot and load required files from it.
+1. Retrieve canonical `SKILL.md`; resolve one canonical turn commit; retrieve all canonical paths from that commit; assemble, write, and verify exactly one timestamped runtime bundle; derive the local runtime tree only from that bundle.
 2. Initialize the Orchestrator and Worker; expose the user prompt to the Worker.
 3. Let the Worker perform one substantive material action.
-4. Orchestrator invokes the recorder.
-5. Recorder appends `recorder_invocation`, timestamps it, and starts the action questioner.
+4. Orchestrator invokes the recorder Runnable from the bundle-derived `scripts/action_event_recorder.py` pathname.
+5. Recorder appends `recorder_invocation`, timestamps it, and starts the bundle-derived action questioner.
 6. Orchestrator supplies each structured questionnaire answer from the correct scope; every enumerated question is presented with its canonical definition table.
 7. After `AQ14`, questioner emits `QUESTIONER_ACTION_OVER` plus its formatted `action_questionnaire`; recorder appends the object.
 8. If `AQ1` is `NO`, continue to the next material action.
-9. If `AQ1` is `YES`, the questioner invokes the end-turn router and remains the caller for the cycle.
+9. If `AQ1` is `YES`, the questioner invokes the bundle-derived `scripts/end_turn_router.py` and remains the caller for the cycle.
 10. Orchestrator supplies router answers through the action questioner; the questioner forwards them to the router.
 11. At a directive, the router returns both its control result and formatted `router_cycle` object to the questioner.
 12. Questioner wraps the router object as `end_turn_result` and returns it to the recorder; recorder appends it.
