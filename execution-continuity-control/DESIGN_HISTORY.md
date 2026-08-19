@@ -10,237 +10,125 @@
 
 ## Purpose
 
-Preserve the reasons behind current mechanisms so later revisions do not reintroduce resolved failures. This file is cumulative but intentionally concise.
+Preserve why current mechanisms exist so later revisions do not reintroduce resolved failures.
 
 ## Design timeline
 
 ### Goal completion and observable execution
 
-The earliest behavior-control design required actual task execution, validation, remediation, and delivery rather than procedural compliance alone. Persistent execution evidence was added so completion claims would not depend on self-certification or reconstructed memory.
+The original objective was actual task execution, validation, remediation, and delivery rather than procedural self-certification. Persistent execution evidence was added so completion claims could be checked against observable state.
 
-**Retained invariants:** accomplish the requested result; support completion claims with observable evidence.
+### Recording moved post-action
 
-### Recording moved from pre-work to post-action
-
-A history-first gate, per-turn history files, templates, and archive rotation were removed because bookkeeping itself could delay the task. Recording became prospective: a material action completes, then recording machinery runs before the next material action begins.
-
-The logical record changed from per-turn/per-chat files to one append-only project record shared across chats.
-
-**Retained invariants:** no retrospective fabrication; cross-chat project continuity; corrections append rather than rewrite history.
+History-first gating, per-turn files, templates, and archive rotation delayed work. Recording became prospective: a material action completes, then recording occurs before another material action. The logical record became one append-only project record shared across chats.
 
 ### Executable end-turn router
 
-Premature stopping after one failed path, reporting intentions instead of acting, and stopping with executable work remaining led to `scripts/end_turn_router.py`. The executable owns questionnaire traversal and directive classification.
+Stopping after one failed path and substituting intentions/status for action led to `scripts/end_turn_router.py`. The executable owns traversal and `CONTINUE`/`COMPLETE`/`IMPASSE` classification.
 
-**Retained invariants:** exhaust viable continuation before impasse; router behavior must alter execution, not merely document it.
+### Canonical source/runtime separation
 
-### Canonical source versus runtime copies
+Canonical authority moved to stable GitHub paths plus exact commit SHA. `main` is pinned once per governed turn and all required files come from that commit. Runtime copies are derivatives only.
 
-Canonical scripts and runtime executables were separated. Runtime copies never acquire canonical authority.
+### Single executable runtime bundle
 
-### Externalized Orchestrator gate
+A retrieval failure showed that connector-fetched source text was not equivalent to executable `/mnt/data` files. Retrieval of `SKILL.md` therefore became a bootstrap event producing one timestamped local bundle containing one coherent pinned snapshot. Canonical relative paths are preserved.
 
-A self-invoked router was bypassable because the same Worker owned both the decision to invoke the gate and the actual turn boundary. Control moved to a higher-scope Orchestrator.
+A passive JSON bundle still left model-managed extraction as a failure point. `scripts/runtime_bundle.py` therefore became an executable template that embeds the manifest, verifies it, owns the private derivative tree, internally dispatches recorder/questioner/router, and is the sole model-facing runtime entrypoint.
 
-The Worker performs the substantive task but cannot actually end the user-facing turn. Worker stop attempts are lifecycle signals. The Orchestrator invokes continuity machinery, routes Worker-scoped answers, and is itself router-gated. Only outer Orchestrator completion can authorize final user-facing delivery.
+### External model-Orchestrator phase
 
-**Retained invariant:** the actor that owns actual termination is outside the Worker and is itself continuity-governed.
+To stop Worker free-running, an intermediate design added a model-Orchestrator identity gate, one-action Worker commands, Orchestrator-scoped end-turn routing, and a final-delivery packet after outer completion. This established important protections: the Worker could not own the user-facing boundary, action cadence became externally controlled, and final delivery used the newest execution record plus a canonical narrative heuristic.
 
-### GitHub canonical migration
+That phase was useful but redundant: the bundle already held deterministic control state and mostly used the model-Orchestrator as a relay.
 
-Canonical source moved to GitHub. Source identity is stable path + repository + commit SHA. `main` is resolved once per governed turn and all required canonical files are read from that exact commit so mixed revisions cannot occur.
+### Bundle becomes sole Orchestrator through action leases
 
-Timestamped canonical source filenames and storage-surface collision rules became superseded environment-specific mechanisms. Their underlying invariants remain: mechanically resolvable authority, immutable revision identity, coherent multi-file snapshots, and no stale-copy authority.
+The model-Orchestrator layer was removed. The executable bundle itself is now the sole Orchestrator and the model is always a Worker acting under one current `WORKER_PAYLOAD`.
 
-### Single runtime bundle bootstrap
+A payload is an action lease with monotonically increasing sequence, unique `action_id`, one authority, one `next_instruction`, captured prompt, context, Worker rules, and an exact return contract. The authorities are `TASK_ACTION`, `CONTINUITY_RESPONSE`, and `FINAL_RESPONSE`.
 
-A later execution failure exposed an ambiguity in the phrase "copy canonical source into the execution environment": retrieving source through the GitHub connector did not itself create executable files under `/mnt/data`. The model could read canonical scripts yet never materialize or execute them.
+The central fail-closed rule is `NO CURRENT PAYLOAD = NO EXECUTION AUTHORITY`. Exactly one unconsumed lease may exist. A task-action lease is consumed before recorder/questioner/router processing; stale, duplicated, mismatched, or wrong-authority IDs are rejected; and a second lease cannot be issued until the first is consumed. Re-entering bootstrap replays an outstanding lease rather than duplicating authority. Control errors grant zero execution authority.
 
-Retrieval of `SKILL.md` therefore became a bootstrap event requiring one coherent pinned snapshot to be materialized locally as a bundle while preserving canonical root-relative paths.
+After a nonterminal action or router `CONTINUE`, the bundle issues one new `TASK_ACTION`. Each protocol question gets its own `CONTINUITY_RESPONSE`, which cannot authorize task work. Terminal Worker `COMPLETE` or `IMPASSE`, after persistence of its `end_turn_result`, causes the bundle to resolve the newest record and issue one `FINAL_RESPONSE` containing the narrative heuristic and file-delivery context.
 
-### Executable bundle owns child materialization and dispatch
+The separate Orchestrator identity gate, Orchestrator questionnaire/router scope, `WORKER_TERMINAL_TO_ORCHESTRATOR`, outer completion, and `FINAL_DELIVERY_TO_ORCHESTRATOR` are superseded. Their protections remain through the lease state machine.
 
-The first runtime-bundle design used a passive JSON document and still required the model to extract embedded script text into executable child files. That left a second avoidable failure boundary.
+### Execution record and recorder/questioner/router responsibilities
 
-The bundle was changed into one executable Python file built from canonical `scripts/runtime_bundle.py` plus an embedded manifest. It verifies the embedded file set and Git blob SHAs, owns its private derivative tree, and became the sole model-facing continuity runtime entrypoint. The model no longer extracts or directly executes child scripts.
+The execution record is an immutable sequence of complete snapshots. Each successor preserves prior actions unchanged, links its predecessor, and appends exactly one action. The recorder is the sole writer. It records invocation and starts the questioner but does not infer action meaning.
 
-The bundle internally invokes recorder, questioner, and router and relays their protocol outputs while preserving child filesystem effects.
+The questioner owns structured post-action capture. `AQ1` is the mechanical end-turn discriminator. The router is invoked only after an end-turn-classified questionnaire is persisted, never writes the record, and returns both a directive and `router_cycle`. The questioner wraps the router object as `end_turn_result` and returns it to the recorder before the directive is acted on.
 
-### Bundle-controlled orchestration loop
+The generic free-form interview was replaced by structured intent/action/plan/evidence/outcome/decision/counterfactual data using `UI#`, `A#`, `P#`, and `E#` references and a finite action ontology. This is post-action representation, not microscopic execution segmentation.
 
-A remaining bypass existed above child dispatch: after bundle bootstrap the model still had to remember to assume the Orchestrator role, expose the user prompt to a Worker, invoke continuity after every action, and manually decide when to give the Worker another action. A model could successfully initialize the runtime yet free-run the Worker or skip the Orchestrator identity boundary.
+### Final narrative and file delivery
 
-The bundle therefore became the orchestration controller rather than only a subscript dispatcher.
+`FINAL_NARRATIVE_HEURISTIC` maps the captured prompt and newest record to the final response. The predecessor action count establishes `current_turn_action_range`, so current-turn work is primary while earlier project actions are prior history only when relevant to inherited state, dependencies, constraints, or changes.
 
-On initial `bootstrap`, the bundle verifies/materializes the pinned snapshot, creates bundle-local control state, and returns `REQUEST_USER_PROMPT`. The complete current user prompt is supplied unchanged and stored as the session task payload.
-
-The bundle then returns `ORCHESTRATOR_IDENTITY_CHECK` containing the canonical Orchestrator definition. The model must explicitly confirm `YES`. A `NO` response produces an instruction to adopt that role; no Worker command is issued until the gate is satisfied.
-
-After confirmation, the bundle returns `ORCHESTRATE_WORKER` with the captured prompt and an explicit rule list. The command permits exactly one next Worker material action. Immediately after that action, the Orchestrator must invoke `after-action --scope worker`. The bundle internally runs recorder/questioner/router and owns the state needed to continue their protocol.
-
-When a non-end-turn Worker action finishes its questionnaire, or a Worker router cycle returns `CONTINUE`, the bundle itself emits the next `ORCHESTRATE_WORKER` control result. This removes the model's discretion to let the Worker perform multiple material actions without passing through continuity control.
-
-The phrase "the script invokes the Orchestrator" is implemented as a mandatory script-to-model control protocol: the Python bundle emits a role-targeted control result that the caller must execute. The script does not claim to instantiate a separate model process by itself.
-
-**Retained invariants:** Orchestrator remains task-domain neutral; captured user intent is preserved; every material action is followed by continuity before another Worker action; Worker terminal states do not own user-facing termination; recorder/questioner/router responsibilities remain distinct.
-
-### Post-Orchestrator final-delivery packet
-
-The next failure boundary was at the end of the lifecycle. A terminal Worker result could return control to the Orchestrator, but the Orchestrator still had to decide how to synthesize the turn's execution record into the user-facing answer, which record snapshot to use, how much prior project history to include, and which generated files to expose. If final-response construction happened before the Orchestrator's own questionnaire/router cycle, the final answer could be based on an execution record that did not yet contain the Orchestrator terminal action or its router result.
-
-The terminal sequence was therefore made explicit and ordered:
-
-`Worker COMPLETE/IMPASSE → WORKER_TERMINAL_TO_ORCHESTRATOR → Orchestrator finalization action → Orchestrator recorder/questioner/router cycle → persisted outer COMPLETE → FINAL_DELIVERY_TO_ORCHESTRATOR → final UI response`
-
-A terminal Worker result now places the bundle in `awaiting_orchestrator_finalization`. Before any Worker resumption or final UI response, the Orchestrator performs its own terminal/finalization action and routes it through `after-action --scope orchestrator`.
-
-Only after the Orchestrator's own `end_turn_result` has been appended and the outer router returns `COMPLETE` does the bundle construct a final-delivery packet. Outer `CONTINUE` resumes execution. Outer `IMPASSE` remains nonterminal and produces no final-delivery packet.
-
-The packet contains the captured user prompt, the final Worker directive, the Orchestrator `COMPLETE`, and the newest execution-record snapshot known after the Orchestrator append. The bundle reads that record file and includes its complete JSON content rather than expecting the Orchestrator to locate or infer the newest snapshot.
-
-To distinguish this turn from accumulated project history, the bundle records the predecessor action count at the first current-turn append and later emits `current_turn_action_range`. The final narrative heuristic treats that range as primary current-turn execution and earlier actions as relative prior history only when they establish dependencies, inherited state, earlier constraints, or changes needed to understand the current outcome.
-
-`FINAL_NARRATIVE_HEURISTIC` is a canonical constant in `scripts/runtime_bundle.py`. It directs the Orchestrator to map the captured prompt to an evidence-backed outcome, prefer newer supported state over stale conflicting history, distinguish accomplishments from plans/self-report, include meaningful gaps or impasse causes, compress low-level continuity bookkeeping, and avoid inventing unrecorded work.
-
-The packet also instructs the Orchestrator to expose Worker-created deliverable files and other user-relevant files when appropriate and available, while suppressing internal continuity runtime/control/questionnaire/record files unless requested or necessary as evidence.
-
-The final UI response is deliberately exempt from another questionnaire cycle. It is the authorized terminal delivery produced immediately after the Orchestrator's own end-turn action has already been recorded/questioned/routed. Re-routing that final response would create infinite terminal recursion.
-
-`FINAL_DELIVERY_TO_ORCHESTRATOR` with `turn_end_authorized = true` therefore replaces a bare `TURN_END_AUTHORIZED` response as the final control primitive.
-
-**Retained invariants:** Worker terminal state remains nonfinal; Orchestrator is still continuity-governed; the final response uses the newest record after the Orchestrator terminal append; current-turn facts are mechanically separated from prior project history where possible; no unrecorded work is fabricated; file exposure is deliverable-oriented rather than an indiscriminate dump of internal runtime artifacts.
-
-### Explicit execution-record schema
-
-Nominal format labels were replaced by one canonical JSON Schema at `schemas/execution-record.schema.json`.
-
-The project record is an immutable sequence of complete snapshots. Each successor preserves earlier actions unchanged, links to the predecessor filename and SHA-256, and appends exactly one new action object.
-
-### Recorder and action-questioner separation
-
-The original recorder combined persistence with an action interview. The recorder was made deliberately ignorant of why it was invoked. On external `invoke`, it appends only a timestamped `recorder_invocation` action and starts `scripts/action_questioner.py`. Child callbacks use a separate append path that never starts another questionnaire.
-
-The action questioner owns post-action interrogation. End-turn detection is an explicit binary question rather than semantic inference from free-form text.
-
-### Router return-path ownership and dual output
-
-An intermediate design allowed `scripts/end_turn_router.py` to call the recorder directly. That violated caller hierarchy. The corrected flow is:
-
-`recorder invoke → questioner → router → questioner → recorder`
-
-The questioner remains the router's caller for the full cycle. A terminal router produces both the model-facing directive and the complete `router_cycle` audit object. The questioner wraps the audit object as `end_turn_result` and returns it to the recorder before the directive is acted upon.
-
-### Decision-engineering questionnaire
-
-The generic eight-question free-form interview was replaced with a structured post-action decision record covering end-turn classification, user intent, `UI#` items, ordered `A#` actions, optional `P#` plans, action-to-intent mappings, `E#` evidence, per-intent outcomes, plan/path divergence, decision bases, overall outcome, supported counterfactuals, and a constrained `NARRATIVE_MAPPING` note.
-
-Atomic action vocabulary remains finite (`ACQUIRE`, `TRANSFORM`, `EVALUATE`, `DECIDE`, `ACT`, `OBSERVE`, `COMMUNICATE`) with canonical subtypes. This decomposition is post-action representation, not a requirement to interrupt execution after microscopic operations.
-
-The questioner validates form and references, not truth or hidden reasoning.
+The heuristic prefers newer supported state, does not convert plans/self-report into accomplishments, includes meaningful gaps/impasse causes, compresses bookkeeping, and exposes real deliverables while suppressing internal continuity artifacts by default. The final UI response is not routed again because the terminal Worker action has already been recorded/questioned/routed.
 
 ## Protected invariants
 
-1. Task completion outranks procedural ceremony.
-2. Execution outranks plans or intentions when execution is requested and available.
-3. Completion, mutation, persistence, and validation claims require observable support.
-4. Do not reconstruct unrecorded history as contemporaneous evidence.
-5. Record completed material actions prospectively before the next material action.
-6. Maintain one append-only project record across chats; corrections are new actions.
-7. Every immutable successor preserves predecessor actions unchanged and appends exactly one new action.
-8. The recorder is the sole execution-record snapshot writer.
-9. Recorder invocation does not classify or infer the action; it timestamps invocation and starts the questioner.
-10. The action questioner preserves exact ordered canonical Q/A pairs, including native structured JSON answers where required.
-11. `AQ1` is the sole action-questionnaire end-turn discriminator and is normalized to explicit `YES` or `NO`.
-12. Every enumerated action-questionnaire question co-presents its canonical definition table.
-13. Atomic action decomposition is post-action representation only; it must not become an execution-delaying microscopic gate.
-14. Structured identifiers (`UI#`, `A#`, `P#`, `E#`) are ordered and cross-referenced.
-15. `NARRATIVE_MAPPING` may explain existing structured data but may not introduce new actions, requirements, plans, outcomes, or identifiers.
-16. The questioner validates form/reference consistency, not truth, hidden reasoning, or correctness of the model's self-report.
-17. `QUESTIONER_ACTION_OVER` means only that questionnaire execution completed.
-18. An end-turn-classified questionnaire invokes the router only after the questionnaire object is recorded.
-19. The questioner remains caller/proxy for the router cycle.
-20. The router never invokes the recorder and has no execution-record write authority.
-21. The executed router owns traversal and `CONTINUE`/`COMPLETE`/`IMPASSE` classification.
-22. A completed router cycle produces both control output and a formatted audit object.
-23. The questioner wraps router data as `end_turn_result` and returns it to recorder before directive execution.
-24. Child-data append does not recursively launch the questioner.
-25. Worker terminal states end only Worker lifecycle; they never directly authorize user-facing output.
-26. The Orchestrator remains task-domain neutral and continuity-governed.
-27. Resolve one Git commit snapshot per governed turn and read all canonical files from it.
-28. Canonical files use stable paths; Git provides version history.
-29. Runtime derivatives have no canonical authority.
-30. Persistent record semantics are storage-provider neutral.
-31. Persistent record structure is controlled by canonical schema plus recorder cross-snapshot invariants.
-32. Historical information is not redundantly restated in every new action object.
-33. Retrieval of canonical `SKILL.md` triggers complete executable-bundle construction before governed execution.
-34. Exactly one timestamped executable runtime bundle represents the pinned Git snapshot locally for a governed turn.
-35. The embedded manifest preserves canonical root-relative paths, including `schemas/` and `scripts/`.
-36. All child execution for the turn derives from the same verified bundle; later GitHub reads cannot become independent runtime sources.
-37. Bundle construction and successful bootstrap are observable prerequisites for initialized continuity runtime.
-38. The model never extracts or directly manages embedded continuity child scripts after bundle creation.
-39. `scripts/runtime_bundle.py` is the canonical executable-bundle template and contains exactly one payload sentinel.
-40. The bundle owns and verifies its private derivative tree.
-41. Recorder child paths are bundle-controlled.
-42. Bundle child execution preserves child protocol output and filesystem/state effects.
-43. Initial bundle invocation requests the complete current user prompt and stores it unchanged before Worker execution.
-44. Orchestrator identity requires an explicit `YES` against the canonical bundle-provided definition before any Worker command.
-45. The canonical Orchestrator definition is supplied by `scripts/runtime_bundle.py`, not reconstructed ad hoc by the caller.
-46. Each `ORCHESTRATE_WORKER` permits exactly one next material Worker action.
-47. After each completed Worker material action, the bundle must be invoked before another Worker material action starts.
-48. Post-action recorder/questioner/router completion precedes issuance of the next Worker command.
-49. The next Worker instruction after a nonterminal action or Worker `CONTINUE` is emitted by the bundle as `ORCHESTRATE_WORKER`.
-50. Worker `COMPLETE`/`IMPASSE` triggers mandatory Orchestrator finalization; it does not directly permit Worker resumption or user-facing delivery.
-51. The Orchestrator's finalization action is recorded, questioned, and routed before any final-delivery packet is constructed.
-52. Outer `CONTINUE` resumes execution; outer `IMPASSE` remains nonterminal; only persisted outer `COMPLETE` permits final delivery.
-53. The final-delivery packet uses the newest execution-record snapshot after the Orchestrator `end_turn_result` append.
-54. The bundle records the predecessor action count on first current-turn append and exposes a mechanical `current_turn_action_range` when finalizing.
-55. `FINAL_NARRATIVE_HEURISTIC` is canonical runtime text and governs current-turn versus prior-history summarization.
-56. Final narrative construction must not convert plans, intentions, questionnaire self-report, or unsupported claims into accomplishments.
-57. Newer supported state outranks stale conflicting prior state in final narrative construction.
-58. Appropriate Worker-created deliverables and other user-relevant files are exposed in the final UI response when available; internal continuity artifacts are not exposed by default.
-59. `FINAL_DELIVERY_TO_ORCHESTRATOR` with `turn_end_authorized = true` is the terminal response-construction authorization.
-60. The final UI response does not trigger another continuity cycle because the immediately preceding Orchestrator finalization action already underwent recorder/questioner/router control.
-61. Bundle-local orchestration control state is tied to the exact timestamped bundle and pinned source SHA.
-62. Direct model-facing recorder/questioner/router dispatch remains superseded; child invocation is internal to the bundle.
+1. Actual requested-task completion outranks procedural ceremony.
+2. Completion/mutation/persistence/validation claims require observable support.
+3. Do not reconstruct unrecorded history as contemporaneous evidence.
+4. Record a completed material action before another material action is authorized.
+5. Maintain one append-only project record; corrections append.
+6. Every successor preserves predecessor actions unchanged and appends exactly one action.
+7. Recorder is the sole execution-record writer and does not infer action meaning.
+8. Questioner captures canonical structured answers; `AQ1` alone discriminates end-turn attempts.
+9. Atomic decomposition is post-action representation, not an execution-delay gate.
+10. Router alone classifies `CONTINUE`/`COMPLETE`/`IMPASSE`, never writes the record, and returns complete audit data through the questioner.
+11. Pin one Git commit per governed turn and read all canonical files from it.
+12. Runtime derivatives never acquire canonical authority.
+13. Retrieval of `SKILL.md` triggers construction of exactly one timestamped executable bundle for the pinned snapshot.
+14. The bundle verifies/owns its derivative tree and internally controls recorder/questioner/router paths.
+15. The model never directly manages embedded continuity child scripts after bundle creation.
+16. The bundle itself is the sole Orchestrator; the model acts as Worker only under a current bundle-issued payload.
+17. `NO CURRENT PAYLOAD = NO EXECUTION AUTHORITY`.
+18. Exactly one unconsumed Worker lease may exist.
+19. Every lease has unique monotonically ordered `action_id`/sequence and exactly one authority.
+20. `TASK_ACTION` authorizes exactly one material action and must be consumed by matching `after-action --action-id` before another task action can be authorized.
+21. `CONTINUITY_RESPONSE` authorizes protocol answering only.
+22. `FINAL_RESPONSE` authorizes terminal UI delivery only.
+23. Missing/stale/duplicate/mismatched/wrong-authority lease IDs are rejected.
+24. A task lease is consumed before recorder/questioner/router processing, leaving no substantive execution authority during continuity processing.
+25. No new Worker lease may be issued while another is unconsumed.
+26. Bootstrap with an outstanding lease replays it rather than duplicating authority.
+27. Control/runtime errors grant zero execution authority.
+28. Capture the complete current user prompt unchanged before the first task lease.
+29. After every Worker material action, bundle re-entry precedes another Worker material action.
+30. Nonterminal questionnaire completion or router `CONTINUE` produces exactly one new `TASK_ACTION` lease.
+31. Worker `COMPLETE`/`IMPASSE` is terminal after its `end_turn_result` is persisted.
+32. Terminal routing resolves the newest execution-record snapshot before `FINAL_RESPONSE` issuance.
+33. `current_turn_action_range` distinguishes current-turn execution from prior project history where mechanically possible.
+34. `FINAL_NARRATIVE_HEURISTIC` governs evidence-based final synthesis and must not turn plans, intentions, questionnaire self-report, or unsupported claims into accomplishments.
+35. Newer supported state outranks stale conflicting prior state.
+36. Appropriate Worker-created/user-relevant files are exposed at final delivery; internal continuity artifacts are suppressed by default.
+37. Final UI delivery does not start another continuity cycle.
+38. Bundle-local control state is tied to the exact timestamped bundle and pinned source SHA.
+39. Direct model-facing child-script dispatch remains superseded.
 
 ## Superseded mechanisms
 
 Do not restore these merely because older artifacts contain them:
 
-- mandatory action-category decomposition as a pre-execution gate;
-- universal history-first gating;
-- one history file per turn;
-- history-template initialization and fixed-count archive rotation;
-- timestamped canonical skill filenames;
-- greatest-filename-timestamp canonical-source selection;
-- collision-suffix canonical defenses;
-- storage-specific canonical persistence handoffs;
-- allowing Worker to own actual `END_TURN`;
-- treating Worker `COMPLETE`/`IMPASSE` or outer `IMPASSE` as actual-turn completion;
-- multiple nominal schema labels without a normative contract;
-- verbose generic per-action semantic categories that repeat record history;
-- the generic eight-question free-form interview;
-- a recorder that interviews the model or infers action type;
-- free-form action parsing for end-turn detection;
-- parallel router history outside the chronological action stream;
-- blank/prospective router placeholders;
-- direct router-to-recorder persistence calls;
-- treating narrative self-report as raw chain-of-thought or independent evidence;
-- treating connector retrieval as equivalent to local runtime materialization;
-- independently fetching/copying runtime scripts after bundle creation;
-- flattening canonical `scripts/` or `schemas/` paths;
-- passive JSON-only bundle requiring model extraction of executable children;
-- direct model invocation of bundle-derived child script paths;
-- caller-supplied recorder questioner/router paths;
-- bootstrap that only reports readiness and leaves prompt capture/role initialization to model memory;
-- preprompt-only Orchestrator activation without an executable identity gate;
-- allowing a Worker to perform multiple material actions before bundle re-entry;
-- direct model-facing child-dispatch commands as the normal governed execution interface;
-- treating `WORKER_TERMINAL_TO_ORCHESTRATOR` as permission to skip the Orchestrator's own final questionnaire/router cycle;
-- exposing a bare `TURN_END_AUTHORIZED` without the latest record and final-response mapping contract;
-- asking the Orchestrator to infer which accumulated project-record actions belong to the current turn when the predecessor boundary is mechanically available;
-- routing the final UI response through another continuity cycle after the Orchestrator terminal action has already been recorded/questioned/routed.
+- universal history-first gating; per-turn history files; history templates/archive rotation;
+- timestamped canonical source filenames or greatest-filename-timestamp authority;
+- storage-surface collision rules as canonical identity;
+- mandatory microscopic action decomposition before execution;
+- free-form end-turn inference or generic eight-question interview;
+- recorder-owned interviewing; router-to-recorder writes; parallel router history; blank router placeholders;
+- treating connector retrieval as local runtime materialization;
+- passive JSON bundle requiring model extraction; direct model invocation of child paths; caller-supplied recorder child paths;
+- allowing multiple Worker material actions before bundle re-entry;
+- a separate model-Orchestrator identity/YES gate;
+- `ORCHESTRATE_WORKER`, Orchestrator-scoped recorder/questioner/router cycles, `WORKER_TERMINAL_TO_ORCHESTRATOR`, outer `COMPLETE`, or `FINAL_DELIVERY_TO_ORCHESTRATOR`;
+- any design in which the Worker may continue merely because no new script instruction was emitted;
+- issuing a second Worker authorization before the first lease is consumed;
+- routing the final UI response through another continuity cycle.
 
 ## Revision rule
 
-Before changing canon, resolve current `main`, read `SKILL.md`, this history, and affected canonical resources from the same commit; identify affected protected invariants; preserve or explicitly supersede them; update this history; stage complete replacement content at stable paths; verify coherence; then move `main`.
+Before changing canon, resolve current `main`; read `SKILL.md`, this history, and affected canonical resources from that same commit; identify affected protected invariants; preserve or explicitly supersede them; stage complete replacements at stable paths; verify coherence; then move `main`.
