@@ -1,0 +1,117 @@
+name: Build Execution Continuity Bundle
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "execution-continuity-control/**"
+      - ".github/workflows/build-execution-continuity-bundle.yml"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-bundle:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Determine canonical identifiers
+        id: ids
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          COMMIT_SHA="${GITHUB_SHA}"
+          SKILL_TREE_SHA="$(git rev-parse "${COMMIT_SHA}:execution-continuity-control")"
+
+          echo "commit_sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "skill_tree_sha=${SKILL_TREE_SHA}" >> "$GITHUB_OUTPUT"
+
+          echo "Commit SHA: ${COMMIT_SHA}"
+          echo "Skill tree SHA: ${SKILL_TREE_SHA}"
+
+      - name: Build bundle manifest
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ steps.ids.outputs.commit_sha }}
+          SKILL_TREE_SHA: ${{ steps.ids.outputs.skill_tree_sha }}
+        run: |
+          set -euo pipefail
+
+          cat > execution-continuity-control/BUNDLE_SOURCE.json <<EOF
+          {
+            "repository": "${GITHUB_REPOSITORY}",
+            "branch": "${GITHUB_REF_NAME}",
+            "commit_sha": "${COMMIT_SHA}",
+            "skill_tree_sha": "${SKILL_TREE_SHA}"
+          }
+          EOF
+
+      - name: Create deterministic ZIP
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ steps.ids.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+
+          ARCHIVE="execution-continuity-control_bundle_${COMMIT_SHA}.zip"
+
+          python3 - <<'PY'
+          import os
+          import zipfile
+          from pathlib import Path
+
+          root = Path("execution-continuity-control")
+          commit = os.environ["COMMIT_SHA"]
+          output = Path(f"execution-continuity-control_bundle_{commit}.zip")
+
+          files = sorted(
+              p for p in root.rglob("*")
+              if p.is_file()
+          )
+
+          with zipfile.ZipFile(
+              output,
+              "w",
+              compression=zipfile.ZIP_DEFLATED,
+              compresslevel=9,
+          ) as zf:
+              for path in files:
+                  arcname = path.as_posix()
+
+                  info = zipfile.ZipInfo(
+                      arcname,
+                      date_time=(1980, 1, 1, 0, 0, 0),
+                  )
+                  info.compress_type = zipfile.ZIP_DEFLATED
+                  info.external_attr = 0o100644 << 16
+
+                  zf.writestr(info, path.read_bytes())
+
+          print(output)
+          PY
+
+          sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
+
+          echo "Bundle:"
+          ls -lh "$ARCHIVE" "${ARCHIVE}.sha256"
+
+          echo "Bundle SHA-256:"
+          cat "${ARCHIVE}.sha256"
+
+      - name: Upload canonical bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: execution-continuity-control-${{ steps.ids.outputs.skill_tree_sha }}
+          path: |
+            execution-continuity-control_bundle_${{ steps.ids.outputs.commit_sha }}.zip
+            execution-continuity-control_bundle_${{ steps.ids.outputs.commit_sha }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
