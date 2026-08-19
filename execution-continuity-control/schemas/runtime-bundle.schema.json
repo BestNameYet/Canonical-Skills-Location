@@ -46,6 +46,7 @@
     "files": {
       "type": "array",
       "minItems": 7,
+      "maxItems": 7,
       "items": {
         "$ref": "#/$defs/file"
       },
@@ -73,8 +74,15 @@
       "properties": {
         "path": {
           "type": "string",
-          "minLength": 1,
-          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+          "enum": [
+            "SKILL.md",
+            "DESIGN_HISTORY.md",
+            "schemas/execution-record.schema.json",
+            "schemas/runtime-bundle.schema.json",
+            "scripts/action_event_recorder.py",
+            "scripts/action_questioner.py",
+            "scripts/end_turn_router.py"
+          ]
         },
         "git_blob_sha": {
           "type": "string",
