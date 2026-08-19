@@ -12,8 +12,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-CONTROL_VERSION = 3
-PAYLOAD_SCHEMA = "execution-continuity-payload-v3"
+CONTROL_VERSION = 4
+PAYLOAD_SCHEMA = "execution-continuity-payload-v4"
+INITIALIZATION_SCHEMA = "execution-continuity-initialization-v1"
 RECORD_PREFIX = "execution-record_"
 RECORD_SUFFIX = ".json"
 STAMP_RE = re.compile(r"^execution-record_(\d{8}T\d{12}Z)\.json$")
@@ -23,7 +24,8 @@ DIRECTIVES = {"CONTINUE", "COMPLETE", "IMPASSE"}
 BEHAVIORAL_INSTRUCTIONS = [
     "The generated bundle is the sole Orchestrator. Act as the Worker only under the current payload.",
     "NO CURRENT PAYLOAD = NO EXECUTION AUTHORITY.",
-    "TASK_ACTION authorizes exactly one material task action.",
+    "The model-facing task_prompt is the governing task statement for this turn.",
+    "TASK_ACTION authorizes exactly one material task action toward task_prompt.",
     "After the commanded action completes, fails, or reaches an attempted end-of-turn stop point, return the complete prior payload unchanged to this same bundle before any further material task action.",
     "During bundle protocol questions, answer only the question asked. Protocol answering grants no substantive task authority.",
     "FINAL_RESPONSE authorizes only construction and delivery of the final user-facing response.",
@@ -40,6 +42,83 @@ ACTION_SUBTYPES = {
     "OBSERVE": {"INSPECT", "RECEIVE", "DETECT_ERROR", "DETECT_CHANGE"},
     "COMMUNICATE": {"ASK", "RETURN", "REPORT", "INSTRUCT", "SIGNAL"},
 }
+
+ACTION_ONTOLOGY_DESCRIPTIONS = {
+    "ACQUIRE": (
+        "obtain information or inputs",
+        {
+            "READ": "read content already available to the Worker",
+            "SEARCH": "look for relevant information among possible sources or locations",
+            "RETRIEVE": "fetch a specifically identified source, object, file, or result",
+        },
+    ),
+    "TRANSFORM": (
+        "derive a new representation or result from available inputs",
+        {
+            "CALCULATE": "compute a numeric or formal result",
+            "DECOMPOSE": "split a whole into meaningful component parts",
+            "SYNTHESIZE": "combine inputs into a new integrated result",
+            "CONVERT": "change representation, format, units, or encoding",
+            "EXTRACT": "isolate requested information from a larger input",
+        },
+    ),
+    "EVALUATE": (
+        "assess information, alternatives, or results without itself committing to an option",
+        {
+            "COMPARE": "assess similarities, differences, or relative properties",
+            "CLASSIFY": "assign an item to a defined category",
+            "VALIDATE": "determine whether an item satisfies a requirement or criterion",
+            "SCORE": "assign a value or ranking under a stated measure",
+        },
+    ),
+    "DECIDE": (
+        "commit to a choice that controls subsequent execution",
+        {
+            "SELECT": "choose one available alternative for subsequent use",
+            "REJECT": "exclude an alternative from subsequent use",
+            "PRIORITIZE": "establish relative execution preference or order",
+            "DEFER": "intentionally postpone an otherwise available alternative",
+        },
+    ),
+    "ACT": (
+        "perform an operation that changes state or invokes executable behavior",
+        {
+            "CREATE": "create a new artifact, object, or persistent state",
+            "MODIFY": "change an existing artifact, object, or persistent state",
+            "DELETE": "remove an existing artifact, object, or persistent state",
+            "EXECUTE": "run executable logic, a command, or a procedure",
+            "CALL": "invoke an external tool, function, service, or operation",
+        },
+    ),
+    "OBSERVE": (
+        "inspect or receive state without intentionally changing it",
+        {
+            "INSPECT": "examine an existing state, artifact, or result",
+            "RECEIVE": "accept information or output delivered by another process or source",
+            "DETECT_ERROR": "observe that an attempted operation failed or produced an error",
+            "DETECT_CHANGE": "observe that state differs from an earlier state",
+        },
+    ),
+    "COMMUNICATE": (
+        "exchange information with the user or another process",
+        {
+            "ASK": "request information needed from another party",
+            "RETURN": "provide a requested result or value",
+            "REPORT": "communicate an observed state, finding, or outcome",
+            "INSTRUCT": "communicate directions for an action",
+            "SIGNAL": "emit a protocol or control indication",
+        },
+    ),
+}
+
+def action_ontology_text() -> str:
+    groups = []
+    for action_type, (type_description, subtypes) in ACTION_ONTOLOGY_DESCRIPTIONS.items():
+        subtype_text = "; ".join(f"{subtype} — {description}" for subtype, description in subtypes.items())
+        groups.append(f"{action_type} — {type_description}: {subtype_text}")
+    return " | ".join(groups)
+
+ACTION_ONTOLOGY_TEXT = action_ontology_text()
 INTENT_RELATIONS = {"DIRECT", "SUPPORTING", "NONE", "OBSTRUCTED"}
 EVIDENCE_TYPES = {"TOOL_RESULT", "ARTIFACT_STATE", "EXTERNAL_SOURCE", "COMPUTED_RESULT", "EXECUTION_RESULT", "USER_VISIBLE_OUTPUT", "MODEL_OBSERVATION", "NONE"}
 INTENT_OUTCOMES = {"SUCCESS", "PARTIAL", "FAILED", "UNADDRESSED", "NOT_APPLICABLE"}
@@ -53,7 +132,7 @@ ACTION_QUESTIONS = [
     {"id":"AQ1","question":"Is this action an end-of-turn attempt? Answer YES or NO.","format":"ENUM: YES | NO","allowed_answers":["YES","NO"]},
     {"id":"AQ2","question":"State the user intent this action was intended to advance as one concise sentence describing the requested end state.","format":"SHORT_TEXT"},
     {"id":"AQ3","question":"Decompose that user intent into a numbered list of independently testable requirements. Answer as a JSON array of {id,text} objects using UI1, UI2, ... in order.","format":"JSON_ARRAY"},
-    {"id":"AQ4","question":"Decompose the completed activity into the smallest meaningful ordered action units. Answer as a JSON array of {id,type,subtype,target} objects using A1, A2, ... in order and only the canonical action ontology.","format":"JSON_ARRAY"},
+    {"id":"AQ4","question":f"Decompose the completed activity into the smallest meaningful ordered action units. Answer as a JSON array of {{id,type,subtype,target}} objects using A1, A2, ... in order. Choose type/subtype only from these enumerated choices, using the accompanying natural-language descriptors: {ACTION_ONTOLOGY_TEXT}","format":"JSON_ARRAY"},
     {"id":"AQ5","question":"Did an explicit plan for this activity exist before execution of the recorded activity began? Answer YES or NO.","format":"ENUM: YES | NO","allowed_answers":["YES","NO"]},
     {"id":"AQ6","question":"Record the prior plan if one existed. Answer as a JSON array of {id,text} objects using P1, P2, ... in order; answer [] when AQ5 is NO.","format":"JSON_ARRAY"},
     {"id":"AQ7","question":"Map each atomic action to the decomposed user-intent items. Answer as a JSON array of {action_id,intent_ids,relation} objects using only existing A# and UI# IDs.","format":"JSON_ARRAY"},
@@ -62,7 +141,7 @@ ACTION_QUESTIONS = [
     {"id":"AQ10","question":"Compare the prior plan with the actual action path. Answer as a JSON object with relationship and divergences. When AQ5 is NO use NO_PRIOR_PLAN and [].","format":"JSON_OBJECT"},
     {"id":"AQ11","question":"For each material decision point, record why the next action was selected. Answer as a JSON array of {action_id,basis,note} objects. Use [] only when no discretionary decision point occurred.","format":"JSON_ARRAY"},
     {"id":"AQ12","question":"Classify the overall outcome of the recorded activity.","format":"ENUM","allowed_answers":sorted(OVERALL_OUTCOMES)},
-    {"id":"AQ13","question":"Record any decision-boundary counterfactuals that are actually supported by the observed state. Answer as a JSON array of {condition,alternate_action_type,alternate_action_subtype,note}. Use [] when none is supported.","format":"JSON_ARRAY"},
+    {"id":"AQ13","question":f"Record any decision-boundary counterfactuals that are actually supported by the observed state. Answer as a JSON array of {{condition,alternate_action_type,alternate_action_subtype,note}}. Choose alternate_action_type/alternate_action_subtype only from these enumerated choices, using the accompanying natural-language descriptors: {ACTION_ONTOLOGY_TEXT} Use [] when none is supported.","format":"JSON_ARRAY"},
     {"id":"AQ14","question":"Provide the required NARRATIVE_MAPPING note using headings NARRATIVE_MAPPING, INTENT:, ACTION_PATH:, PLAN_RELATION:, OUTCOME_MAPPING:, and DECISION_CONTEXT:. Reference existing UI#, A#, P#, and E# identifiers where applicable.","format":"FORMATTED_TEXT"},
 ]
 
@@ -215,13 +294,10 @@ def verify_payload(payload: Any) -> dict[str, Any]:
     return payload
 
 def runtime_record_dir() -> Path:
-    configured = os.environ.get("EXECUTION_CONTINUITY_RECORD_DIR")
-    if configured:
-        return Path(configured)
     base = Path("/mnt/data")
     if base.exists() and os.access(base, os.W_OK):
-        return base / "execution-continuity-control-records"
-    return Path.cwd() / "execution-continuity-control-records"
+        return base
+    return Path.cwd()
 
 def record_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -506,19 +582,32 @@ def run_router()->dict[str,Any]:
         if target=="IMPASSE": cycle["impasse_evidence"]=stopping_fact or "No additional impasse evidence was captured beyond the recorded router answers."
         return cycle
 
-def new_state()->dict[str,Any]:
+def new_state(user_prompt:str)->dict[str,Any]:
+    if not isinstance(user_prompt,str) or not user_prompt:
+        raise ValueError("initialization user_prompt must be a non-empty string")
     record_state=record_latest(runtime_record_dir())
-    return {"control_version":CONTROL_VERSION,"sequence":1,"record_state":record_state,"turn_start_action_count":record_state["action_count"],"last_router":None}
+    return {
+        "control_version":CONTROL_VERSION,
+        "sequence":1,
+        "record_state":record_state,
+        "turn_start_action_count":record_state["action_count"],
+        "last_router":None,
+        "original_user_prompt":user_prompt,
+        "task_prompt":user_prompt,
+        "prompt_intake_mode":"VERBATIM",
+    }
 
 def issue_task_payload(state:dict[str,Any],command:str,context:dict[str,Any]|None=None)->dict[str,Any]:
-    return seal_payload({"schema":PAYLOAD_SCHEMA,"authority":"TASK_ACTION","command":command,"context":context or {},"behavioral_instructions":BEHAVIORAL_INSTRUCTIONS,"state":state})
+    task_prompt=require_text(state.get("task_prompt"),"state.task_prompt")
+    return seal_payload({"schema":PAYLOAD_SCHEMA,"authority":"TASK_ACTION","task_prompt":task_prompt,"command":command,"context":context or {},"behavioral_instructions":BEHAVIORAL_INSTRUCTIONS,"state":state})
 
 def issue_final_payload(state:dict[str,Any],router_cycle:dict[str,Any])->dict[str,Any]:
     rs=state["record_state"]
     record_content=None
     if rs.get("record") and Path(rs["record"]).exists():
         record_content=record_read(Path(rs["record"]))
-    return seal_payload({"schema":PAYLOAD_SCHEMA,"authority":"FINAL_RESPONSE","command":"Construct and deliver the final user-facing response from the current conversation and terminal context. Do not perform additional substantive task work.","context":{"terminal_directive":router_cycle["directive"],"router_cycle":router_cycle,"execution_record_path":rs.get("record"),"execution_record_filename":rs.get("record_name"),"execution_record":record_content,"current_turn_action_range":{"start_sequence":state["turn_start_action_count"]+1,"end_sequence":rs["action_count"]}},"behavioral_instructions":BEHAVIORAL_INSTRUCTIONS,"state":state})
+    task_prompt=require_text(state.get("task_prompt"),"state.task_prompt")
+    return seal_payload({"schema":PAYLOAD_SCHEMA,"authority":"FINAL_RESPONSE","task_prompt":task_prompt,"command":"Construct and deliver the final user-facing response satisfying task_prompt from the current conversation and terminal context. Do not perform additional substantive task work.","context":{"terminal_directive":router_cycle["directive"],"router_cycle":router_cycle,"execution_record_path":rs.get("record"),"execution_record_filename":rs.get("record_name"),"execution_record":record_content,"current_turn_action_range":{"start_sequence":state["turn_start_action_count"]+1,"end_sequence":rs["action_count"]}},"behavioral_instructions":BEHAVIORAL_INSTRUCTIONS,"state":state})
 
 def process_returned_payload(payload:dict[str,Any])->dict[str,Any]:
     payload=verify_payload(payload)
@@ -532,25 +621,46 @@ def process_returned_payload(payload:dict[str,Any])->dict[str,Any]:
     end_attempt=questionnaire["state"]["answers"]["AQ1"]=="YES"
     state["sequence"]+=1
     if not end_attempt:
-        return issue_task_payload(state,"Perform exactly one next material action toward the current user request. Return this complete payload unchanged when that action reaches a stop point.",{"questionnaire":"nonterminal"})
+        return issue_task_payload(state,"Perform exactly one next material action toward task_prompt. Return this complete payload unchanged when that action reaches a stop point.",{"questionnaire":"nonterminal"})
     router_cycle=run_router()
     record_append(rs,{"action_type":"end_turn_result","scope":"worker","router_cycle":router_cycle})
     state["last_router"]=router_cycle
     if router_cycle["directive"]=="CONTINUE":
-        return issue_task_payload(state,router_cycle.get("instruction") or "Continue execution toward the requested result.",{"router_cycle":router_cycle})
+        return issue_task_payload(state,router_cycle.get("instruction") or "Continue execution toward task_prompt.",{"router_cycle":router_cycle})
     return issue_final_payload(state,router_cycle)
 
 def emit(payload:dict[str,Any])->int:
     print(json.dumps(payload,ensure_ascii=False),flush=True)
     return 0
 
+def parse_initialization(value:Any)->str:
+    if not isinstance(value,dict) or set(value)!={"schema","type","user_prompt"}:
+        raise ValueError("initialization object must contain exactly schema, type, and user_prompt")
+    if value.get("schema")!=INITIALIZATION_SCHEMA:
+        raise ValueError("initialization schema is invalid")
+    if value.get("type")!="INITIALIZE":
+        raise ValueError("initialization type must be INITIALIZE")
+    return require_text(value.get("user_prompt"),"initialization.user_prompt")
+
+def process_initialization(value:Any)->dict[str,Any]:
+    user_prompt=parse_initialization(value)
+    state=new_state(user_prompt)
+    return issue_task_payload(
+        state,
+        "Execute exactly one material next action toward task_prompt. Return this complete payload unchanged when that action completes, fails, or reaches an attempted end-of-turn stop point.",
+        {"initialization":"accepted","prompt_intake_mode":state["prompt_intake_mode"]},
+    )
+
 def main()->int:
     first=sys.stdin.readline()
     if first=="" or not first.strip():
-        return emit(issue_task_payload(new_state(),"Perform exactly one material action toward the current user request. Return this complete payload unchanged when that action completes, fails, or reaches an attempted end-of-turn stop point."))
+        print(json.dumps({"schema":PAYLOAD_SCHEMA,"authority":"NONE","execution_authority":False,"error":"InitializationRequired","detail":f"Invoke with one JSON line using schema {INITIALIZATION_SCHEMA} and type INITIALIZE, or return a previously issued payload."},ensure_ascii=False),flush=True)
+        return 2
     try:
-        returned=json.loads(first)
-        return emit(process_returned_payload(returned))
+        value=json.loads(first)
+        if isinstance(value,dict) and value.get("schema")==INITIALIZATION_SCHEMA:
+            return emit(process_initialization(value))
+        return emit(process_returned_payload(value))
     except Exception as exc:
         print(json.dumps({"schema":PAYLOAD_SCHEMA,"authority":"NONE","execution_authority":False,"error":type(exc).__name__,"detail":str(exc)},ensure_ascii=False),flush=True)
         return 2
