@@ -45,6 +45,25 @@ The current interface uses the entire payload as the continuation object:
 
 Payload state is opaque to the Worker. A SHA-256 over canonicalized payload content detects mutation. Separate controller-state and questionnaire/router state files are no longer part of the control protocol. Execution-record snapshots remain persisted because audit persistence is distinct from continuation state.
 
+## 2026-08-19 — source-anchored semantic preprocessor v2
+
+The first semantic preprocessor decomposed the user prompt into requirements, then derived an execution action graph and model-rendered fragments, and finally used `_recompose()` to turn the action graph back into a new `task_prompt`. This created a category error: an operational method chosen to satisfy the request could become a new user-level requirement merely because it appeared in the plan. In the observed failure, source-reading was a reasonable execution strategy, but recompilation converted it into a new source-grounding requirement. A separate requirement mapping also broadened singular `recurring issue` to plural `recurring issues`. The final semantic audit correctly rejected the candidate, but only after the contaminated prompt had already been generated.
+
+The correction changes the computational model rather than adding another downstream guard:
+
+- `original_user_prompt` remains the authoritative text object;
+- the semantic engine first produces a source-anchored contextual map of semantic items, semantic relations, material ambiguities, and preservation-sensitive features;
+- source anchors use exact substrings plus occurrence counts rather than model-generated character offsets;
+- a separate semantic-attention map identifies fragility, rewrite freedom, protected features, and protected relations; higher attention means lower rewrite freedom;
+- candidate revision uses bounded source-relative replacement edits only; the model does not regenerate the whole prompt from an abstract representation;
+- deterministic validation checks edit anchors, overlap, semantic intersections, relation intersections, and `LOCKED` spans before patch application;
+- the candidate is independently remapped without receiving the original map;
+- an explicit item/relation alignment audit compares the independently generated source and candidate maps and rejects omissions, additions, changed features, changed relations, or other semantic drift;
+- execution planning runs only after semantic equivalence passes and is stored separately from `task_prompt`;
+- the execution plan may select methods or information-acquisition steps, but it is never eligible input for rewriting `task_prompt`;
+- the previously observed singular-to-plural mutation is covered by a local regression test in which a `LOCKED` `recurring issue` anchor cannot be edited to `recurring issues` before semantic audit;
+- fallback remains fail-safe: material ambiguity, candidate ambiguity, protocol failure, or failed semantic equivalence restores the verbatim original prompt without failing the user's task.
+
 ## Protected invariants
 
 1. Requested-task completion outranks procedural ceremony.
@@ -72,6 +91,9 @@ Payload state is opaque to the Worker. A SHA-256 over canonicalized payload cont
 23. There is no pseudo-subprocess/CLI compatibility layer among continuity components.
 24. GitHub Actions must compile-check and directly execute the canonical bundle before publishing its artifact pointer.
 25. Related source changes are staged together and `main` is moved only after the complete source set has been validated.
+26. Prompt preprocessing must treat `original_user_prompt` as the authoritative semantic source; an execution plan is never an authoritative source for governing prompt semantics.
+27. Any accepted preprocessor revision must be source-relative, mechanically patched, independently remapped, and semantically equivalent at both item and relation levels.
+28. Semantic-attention metadata controls rewrite freedom: preservation-sensitive features and relations may not be broadened, weakened, strengthened, reassigned, or silently dropped.
 
 ## Superseded mechanisms
 
@@ -88,7 +110,9 @@ Do not restore these merely because historical revisions contain them:
 - model-facing `bootstrap`, `provide-prompt`, `after-action`, or `continuity-answer` subcommands;
 - a separate hidden controller-state file;
 - requiring the Worker to extract an action ID or state fragment from a payload;
-- reconstructing the runtime from stale or historical child scripts.
+- reconstructing the runtime from stale or historical child scripts;
+- recompiling execution-plan actions into `task_prompt`;
+- treating exact supporting-text provenance as proof that a paraphrased semantic claim is equivalent.
 
 ## Revision rule
 
