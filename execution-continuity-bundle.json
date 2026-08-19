@@ -1,10 +1,12 @@
 {
   "repository": "BestNameYet/Canonical-Skills-Location",
   "branch": "main",
-  "workflow_run_id": "32263819576",
-  "artifact_id": "9369329493",
-  "artifact_url": "https://github.com/BestNameYet/Canonical-Skills-Location/actions/runs/32263819576/artifacts/9369329493",
-  "artifact_digest": "abf200f0b87284c431b61b33585760fd6b1d62a57472e751b3d259cb8f88078b",
-  "commit_sha": "eed633fbba620f938660e5ded46e770d0bf28582",
-  "skill_tree_sha": "c223516068a853309becd2a60693dae267aafc7b"
+  "workflow_run_id": "32267015606",
+  "artifact_id": "9370593892",
+  "artifact_url": "https://github.com/BestNameYet/Canonical-Skills-Location/actions/runs/32267015606/artifacts/9370593892",
+  "artifact_digest": "0f1ea4967f3962525888d2057c2c28c55ebe5843fe4e03b31fa0c720ab6954e7",
+  "bundle_filename": "bundle.py",
+  "bundle_sha256": "09d719e26ca74026bc6c134d57d967298f1c3b8f98ad1788b7b5be500cfeded2",
+  "commit_sha": "a9850a810b4ec8775a934a2071c27e14cc8bd551",
+  "skill_tree_sha": "aaf8dfb90a9e029f9de87b3bf4735a2aa8087b13"
 }
