@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Interactive execution-event recorder using timestamped project snapshots.
 
-Persistent records follow ``execution-record.schema.json``. Runtime session and
-receipt files are implementation bookkeeping and do not declare independent
-format identities.
+Persistent records follow ``execution-record.schema.json``. Each entry is an
+incremental event delta: do not restate history already present in earlier
+entries unless needed to identify the new event or its dependency. Runtime
+session and receipt files are implementation bookkeeping and do not declare
+independent format identities.
 """
 from __future__ import annotations
 
@@ -31,9 +33,9 @@ PROJECT_FIELDS = {"project_id", "project_title"}
 ENTRY_FIELDS = {"entry_id", "sequence", "recorded_at", "chat_id", "chat_title", "event", "outcome", "evidence"}
 
 QUESTIONS = [
-    ("event", "What occurred, including the relevant action or target?"),
-    ("outcome", "What was the actual outcome or resulting state?"),
-    ("evidence", "What observable evidence supports that outcome?"),
+    ("event", "What new event occurred? Record only the delta from prior entries, including the relevant action or target."),
+    ("outcome", "What new outcome or resulting state followed from that event?"),
+    ("evidence", "What new observable evidence supports that outcome?"),
 ]
 
 
