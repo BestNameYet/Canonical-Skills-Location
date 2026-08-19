@@ -6,7 +6,8 @@
 - Canonical branch: `main`
 - Canonical path: `execution-continuity-control/DESIGN_HISTORY.md`
 - Version identity: Git commit SHA
-- Operational authority: `SKILL.md`
+- Bootstrap authority: `SKILL.md`
+- Full operational authority after bootstrap: `BUNDLE_INSTRUCTIONS.md`
 
 ## Purpose
 
@@ -32,7 +33,7 @@ Canonical authority moved to stable GitHub paths plus exact commit SHA. Construc
 
 ### Single executable runtime bundle
 
-A retrieval failure showed that connector-fetched source text was not equivalent to executable `/mnt/data` files. Retrieval of `SKILL.md` therefore became a bootstrap-discovery event producing one timestamped local bundle containing one coherent pinned snapshot when a bundle needed to be built. Canonical relative paths are preserved.
+A retrieval failure showed that connector-fetched source text was not equivalent to executable `/mnt/data` files. Retrieval of canonical source therefore became a bootstrap-discovery event producing one timestamped local bundle containing one coherent pinned snapshot when a runtime bundle needed to be built. Canonical relative paths are preserved.
 
 A passive JSON bundle still left model-managed extraction as a failure point. `scripts/runtime_bundle.py` therefore became an executable template that embeds the manifest, verifies it, owns the private derivative tree, internally dispatches recorder/questioner/router, and is the sole model-facing runtime entrypoint.
 
@@ -56,19 +57,32 @@ The separate Orchestrator identity gate, Orchestrator questionnaire/router scope
 
 ### Reusable bundle freshness gate
 
-Unconditional per-turn bundle construction was found to be redundant and expensive. A previously constructed bundle already contains an exact coherent canonical snapshot and does not need to be rebuilt merely because a new governed user turn begins.
+Unconditional per-turn runtime-bundle construction was found to be redundant and expensive. A previously constructed bundle already contains an exact coherent canonical snapshot and does not need to be rebuilt merely because a new governed user turn begins.
 
-The repository commit SHA is retained as exact provenance, but it is intentionally not the rebuild discriminator. A commit SHA changes when any part of the repository changes, including unrelated skills. The Git tree SHA for the canonical `execution-continuity-control/` directory changes only when that directory tree changes. It therefore became the freshness identity for reusable bundles.
+The repository commit SHA is retained as exact provenance, but it is intentionally not the rebuild discriminator. A commit SHA changes when any part of the repository changes, including unrelated skills. The Git tree SHA for the canonical `execution-continuity-control/` directory changes only when that directory tree changes. It therefore became the freshness identity for reusable runtime bundles.
 
-Each constructed bundle carries a machine-readable `EXECUTION_CONTINUITY_PIN` header containing both the construction `commit_sha` and the `skill_tree_sha`. The manifest's existing commit SHA continues to identify the exact source snapshot used for construction; the header's skill-tree SHA controls reuse.
+Each constructed runtime bundle carries a machine-readable `EXECUTION_CONTINUITY_PIN` header containing both the construction `commit_sha` and the `skill_tree_sha`. The manifest's existing commit SHA continues to identify the exact source snapshot used for construction; the header's skill-tree SHA controls reuse.
 
 On first bootstrap immediately after construction, no GitHub comparison is performed because the just-built bundle is already known to match the exact source pin used to build it. On later initialization, the caller first locates an existing bundle, resolves current `main` and the current skill-subtree tree SHA, and compares the stored tree SHA. An equal tree SHA reuses the bundle even if `main` now points to a different repository commit. A mismatch, missing bundle, or malformed pin invalidates reuse and causes reconstruction from the current exact commit.
 
-This freshness check is deliberately earlier than full canonical retrieval. Only a mismatch pays the cost of retrieving all canonical files and constructing another bundle.
+This freshness check is deliberately earlier than canonical source acquisition. Only a mismatch pays the cost of obtaining the canonical source snapshot and constructing another runtime bundle.
 
-A persistent derivative cache, such as the ChatGPT Library, may preserve the exact bundle across runtime reallocations. A Library copy is still noncanonical and must be materialized into the execution environment before execution when a local pathname is required. If only `/mnt/data` is available, reuse lasts only as long as that runtime artifact survives.
+A persistent derivative cache, such as the ChatGPT Library, may preserve the exact runtime bundle across runtime reallocations. A cached copy is still noncanonical and must be materialized into the execution environment before execution when a local pathname is required. If only `/mnt/data` is available, reuse lasts only as long as that runtime artifact survives.
 
-This revision supersedes the earlier protected invariant that retrieval of `SKILL.md` necessarily triggered construction of a new timestamped bundle for every governed turn. Retrieval remains necessary for reconstruction, but reconstruction is now conditional on freshness failure or cache absence.
+### One-shot GitHub source archive and bootstrap split
+
+Per-file canonical retrieval remained mechanically expensive and created multiple opportunities for partial retrieval, truncation, connector mismatch, or mixed-snapshot reconstruction. The canonical repository currently contains only the execution-continuity skill tree, so GitHub's exact-commit repository ZIP is a natural transport container for the complete source snapshot.
+
+The bootstrap was therefore split into two layers:
+
+- `SKILL.md` is intentionally small. It resolves the current commit and skill-tree SHA, reuses a valid runtime bundle when the tree is unchanged, and otherwise provides one exact-commit archive download command.
+- `BUNDLE_INSTRUCTIONS.md` is carried inside that downloaded archive and contains the full operational contract formerly held in `SKILL.md`.
+
+The source archive is pinned by the exact commit SHA before download. It is a transport container only; it does not create a new authority identity. All construction inputs come from the one extracted archive. Individual canonical-file retrieval is no longer a normal reconstruction path.
+
+This preserves the earlier freshness optimization: an unchanged valid runtime bundle is reused before any archive download. When reconstruction is required, one archive transfer replaces the previous sequence of separate canonical file fetches.
+
+The executable runtime bundle remains a separate derivative artifact. The archive contains the canonical source needed to build it; `BUNDLE_INSTRUCTIONS.md` describes construction and execution, while the runtime bundle still embeds the executable-construction source set defined by `schemas/runtime-bundle.schema.json`.
 
 ### Execution record and recorder/questioner/router responsibilities
 
@@ -96,12 +110,12 @@ The heuristic prefers newer supported state, does not convert plans/self-report 
 8. Questioner captures canonical structured answers; `AQ1` alone discriminates end-turn attempts.
 9. Atomic decomposition is post-action representation, not an execution-delay gate.
 10. Router alone classifies `CONTINUE`/`COMPLETE`/`IMPASSE`, never writes the record, and returns complete audit data through the questioner.
-11. When reconstruction is required, pin one Git commit and read all canonical files from it.
+11. When reconstruction is required, pin one Git commit and obtain all canonical files from that one exact snapshot.
 12. Runtime derivatives never acquire canonical authority.
-13. Bundle construction is conditional: reuse a valid existing bundle when its stored skill-tree SHA matches the current canonical skill-tree SHA; construct only when no valid candidate exists or freshness fails.
-14. The bundle verifies/owns its derivative tree and internally controls recorder/questioner/router paths.
-15. The model never directly manages embedded continuity child scripts after bundle creation.
-16. The bundle itself is the sole Orchestrator; the model acts as Worker only under a current bundle-issued payload.
+13. Runtime-bundle construction is conditional: reuse a valid existing bundle when its stored skill-tree SHA matches the current canonical skill-tree SHA; construct only when no valid candidate exists or freshness fails.
+14. The executable bundle verifies/owns its derivative tree and internally controls recorder/questioner/router paths.
+15. The model never directly manages embedded continuity child scripts after runtime-bundle creation.
+16. The executable bundle itself is the sole Orchestrator; the model acts as Worker only under a current bundle-issued payload.
 17. `NO CURRENT PAYLOAD = NO EXECUTION AUTHORITY`.
 18. Exactly one unconsumed Worker lease may exist.
 19. Every lease has unique monotonically ordered `action_id`/sequence and exactly one authority.
@@ -123,14 +137,19 @@ The heuristic prefers newer supported state, does not convert plans/self-report 
 35. Newer supported state outranks stale conflicting prior state.
 36. Appropriate Worker-created/user-relevant files are exposed at final delivery; internal continuity artifacts are suppressed by default.
 37. Final UI delivery does not start another continuity cycle.
-38. Bundle-local control state is tied to the exact timestamped bundle and pinned source commit SHA from which that bundle was constructed.
+38. Bundle-local control state is tied to the exact timestamped runtime bundle and pinned source commit SHA from which that bundle was constructed.
 39. Direct model-facing child-script dispatch remains superseded.
-40. The Git tree SHA of `execution-continuity-control/` is the reusable-bundle freshness discriminator; repository commit SHA remains provenance rather than freshness identity.
-41. A repository commit change with unchanged skill-tree SHA must not force bundle reconstruction.
-42. First bootstrap of a just-constructed bundle does not perform a redundant freshness comparison.
-43. Later initialization of a previously constructed bundle requires freshness comparison before `bootstrap`.
-44. A missing, malformed, wrong-scope, or mismatched bundle pin grants no execution authority and requires reconstruction from the current exact commit.
-45. Persistent cache copies of bundles are runtime derivatives only; materialization or copying does not give them canonical authority.
+40. The Git tree SHA of `execution-continuity-control/` is the reusable-runtime-bundle freshness discriminator; repository commit SHA remains provenance rather than freshness identity.
+41. A repository commit change with unchanged skill-tree SHA must not force runtime-bundle reconstruction.
+42. First bootstrap of a just-constructed runtime bundle does not perform a redundant freshness comparison.
+43. Later initialization of a previously constructed runtime bundle requires freshness comparison before `bootstrap`.
+44. A missing, malformed, wrong-scope, or mismatched runtime-bundle pin grants no execution authority and requires reconstruction from the current exact commit.
+45. Persistent cache copies of runtime bundles are runtime derivatives only; materialization or copying does not give them canonical authority.
+46. `SKILL.md` remains a minimal bootstrap entry point; the full post-bootstrap operational contract lives in canonical `BUNDLE_INSTRUCTIONS.md`.
+47. Canonical source reconstruction uses one exact-commit GitHub archive rather than independent per-file retrieval.
+48. Every reconstruction input used together must come from the same extracted archive selected by the pre-download commit pin.
+49. The archive is transport only; exact commit SHA remains provenance and skill-tree SHA remains runtime-bundle freshness identity.
+50. A source-archive acquisition failure must not be bypassed by assembling a partial or mixed canonical snapshot from individually retrieved files.
 
 ## Superseded mechanisms
 
@@ -150,10 +169,12 @@ Do not restore these merely because older artifacts contain them:
 - any design in which the Worker may continue merely because no new script instruction was emitted;
 - issuing a second Worker authorization before the first lease is consumed;
 - routing the final UI response through another continuity cycle;
-- unconditional construction of a new bundle merely because a new governed turn began;
+- unconditional construction of a new runtime bundle merely because a new governed turn began;
 - using repository commit SHA alone as the rebuild discriminator when the canonical skill subtree is unchanged;
-- rechecking GitHub freshness immediately after constructing a bundle from the just-resolved current source pin.
+- rechecking GitHub freshness immediately after constructing a runtime bundle from the just-resolved current source pin;
+- retrieving the canonical reconstruction source set through a sequence of independent per-file GitHub calls when an exact-commit source archive is available;
+- carrying the full operational contract in the bootstrap `SKILL.md`.
 
 ## Revision rule
 
-Before changing canon, resolve current `main`; read `SKILL.md`, this history, and affected canonical resources from that same commit; identify affected protected invariants; preserve or explicitly supersede them; stage complete replacements at stable paths; verify coherence; then move `main`.
+Before changing canon, resolve current `main`; acquire one exact current commit archive; read `SKILL.md`, `BUNDLE_INSTRUCTIONS.md`, this history, and affected canonical resources from that same archive; identify affected protected invariants; preserve or explicitly supersede them; stage complete replacements; verify coherence and archive-bootstrap correctness; then move `main`.
