@@ -7,7 +7,6 @@ on:
     paths:
       - "execution-continuity-control/**"
       - ".github/workflows/build-execution-continuity-bundle.yml"
-
   workflow_dispatch:
 
 permissions:
@@ -16,7 +15,6 @@ permissions:
 jobs:
   build-bundle:
     runs-on: ubuntu-latest
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -26,44 +24,38 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           COMMIT_SHA="${GITHUB_SHA}"
           SKILL_TREE_SHA="$(git rev-parse "${COMMIT_SHA}:execution-continuity-control")"
-
           echo "commit_sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
           echo "skill_tree_sha=${SKILL_TREE_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Build single-file bundle
+      - name: Stage canonical single-file bundle
         shell: bash
-        env:
-          COMMIT_SHA: ${{ steps.ids.outputs.commit_sha }}
-          SKILL_TREE_SHA: ${{ steps.ids.outputs.skill_tree_sha }}
         run: |
           set -euo pipefail
-
           mkdir -p dist
-
-          python3 execution-continuity-control/scripts/build_bundle.py \
-            --source-root execution-continuity-control \
-            --output dist/bundle.py \
-            --repository "${GITHUB_REPOSITORY}" \
-            --branch "${GITHUB_REF_NAME}" \
-            --commit-sha "${COMMIT_SHA}" \
-            --skill-tree-sha "${SKILL_TREE_SHA}"
+          cp execution-continuity-control/bundle.py dist/bundle.py
+          chmod +x dist/bundle.py
 
       - name: Validate generated bundle
         shell: bash
         run: |
           set -euo pipefail
-
           test -s dist/bundle.py
           python3 -m py_compile dist/bundle.py
+          EXECUTION_CONTINUITY_RECORD_DIR="$RUNNER_TEMP/ecc-smoke-records" python3 dist/bundle.py </dev/null > dist/initial-payload.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          payload = json.loads(Path('dist/initial-payload.json').read_text())
+          assert payload['schema'] == 'execution-continuity-payload-v3'
+          assert payload['authority'] == 'TASK_ACTION'
+          assert isinstance(payload['state'], dict)
+          assert payload['state']['control_version'] == 3
+          assert payload['command']
+          assert payload['payload_sha256']
+          PY
           sha256sum dist/bundle.py > dist/bundle.py.sha256
-
-          echo "Generated bundle:"
-          ls -lh dist/bundle.py
-          echo "Bundle SHA-256:"
-          cat dist/bundle.py.sha256
 
       - name: Upload canonical bundle artifact
         id: upload_bundle
@@ -85,9 +77,7 @@ jobs:
           SKILL_TREE_SHA: ${{ steps.ids.outputs.skill_tree_sha }}
         run: |
           set -euo pipefail
-
           BUNDLE_SHA256="$(cut -d ' ' -f1 dist/bundle.py.sha256)"
-
           cat > execution-continuity-bundle.json <<EOF
           {
             "repository": "${GITHUB_REPOSITORY}",
@@ -103,22 +93,15 @@ jobs:
           }
           EOF
 
-          cat execution-continuity-bundle.json
-
       - name: Publish bundle pointer
         shell: bash
         run: |
           set -euo pipefail
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           git add execution-continuity-bundle.json
-
           if git diff --cached --quiet; then
-            echo "Bundle pointer unchanged."
             exit 0
           fi
-
           git commit -m "Update execution continuity bundle pointer [skip ci]"
           git push

@@ -4,177 +4,92 @@
 
 - Canonical repository: `BestNameYet/Canonical-Skills-Location`
 - Canonical branch: `main`
-- Canonical path: `execution-continuity-control/DESIGN_HISTORY.md`
+- Canonical path: `execution-continuity-control/`
 - Version identity: Git commit SHA
-- Bootstrap authority: `SKILL.md`
-- Full operational authority after bootstrap: `BUNDLE_INSTRUCTIONS.md`
+- Runtime authority: the Actions artifact referenced by repository-root `execution-continuity-bundle.json`
 
-## Purpose
+## Protected design history
 
-Preserve why current mechanisms exist so later revisions do not reintroduce resolved failures.
+The system exists to force completion-oriented execution rather than allow planning, status reporting, one failed path, or unsupported completion claims to substitute for doing the requested work.
 
-## Design timeline
+Recording moved from history-first bookkeeping to prospective post-action recording. One logical project execution record is represented by immutable timestamped snapshots. The recorder is the sole writer, the action questionnaire owns structured post-action representation, and the end-turn router alone classifies `CONTINUE`, `COMPLETE`, or `IMPASSE`.
 
-### Goal completion and observable execution
+A self-invoked end-turn gate was bypassable because the same model controlled both work and the actual turn boundary. Control therefore moved into a runtime bundle. The bundle is the Orchestrator; the model is a Worker operating only under current bundle-issued authorization.
 
-The original objective was actual task execution, validation, remediation, and delivery rather than procedural self-certification. Persistent execution evidence was added so completion claims could be checked against observable state.
+## 2026-08-19 — child-script and CLI architecture removed
 
-### Recording moved post-action
+An intermediate bundle implementation embedded `action_event_recorder.py`, `action_questioner.py`, and `end_turn_router.py` as pseudo-scripts. The builder wrapped complete CLI programs in factories, rewrote `sys.argv`, captured stdout JSON, and tried to remove `__main__` blocks by exact textual matching. `end_turn_router.py` used a compact `if __name__=="__main__":` form that escaped stripping, so its CLI executed while the generated bundle loaded and intercepted the intended controller entrypoint.
 
-History-first gating, per-turn files, templates, and archive rotation delayed work. Recording became prospective: a material action completes, then recording occurs before another material action. The logical record became one append-only project record shared across chats.
+The resolution is structural, not another guard-pattern patch:
 
-### Executable end-turn router
+- the canonical runtime source is now exactly one file: `execution-continuity-control/bundle.py`;
+- recorder, questioner, router, payload, and controller behavior are ordinary functions in that file;
+- the former child scripts are deleted from canon;
+- the former build wrapper is deleted;
+- there is no subprocess bridge, child CLI, `sys.argv` rewriting, stdout JSON proxy, source encoding, dynamic source evaluation, or main-guard stripping;
+- GitHub Actions validates and publishes the canonical single-file bundle rather than reconstructing it from child scripts.
 
-Stopping after one failed path and substituting intentions/status for action led to `scripts/end_turn_router.py`. The executable owns traversal and `CONTINUE`/`COMPLETE`/`IMPASSE` classification.
+## 2026-08-19 — opaque payload round trip
 
-### Canonical source/runtime separation
+The earlier controller exposed model-facing commands such as `bootstrap`, `provide-prompt`, `after-action`, and `continuity-answer`, plus a separate hidden controller-state file. That made the model parse identifiers and reconstruct controller calls.
 
-Canonical authority moved to stable GitHub paths plus exact commit SHA. Construction pins one commit and all required files come from that commit. Runtime copies are derivatives only.
+The current interface uses the entire payload as the continuation object:
 
-### Single executable runtime bundle
+1. execute `bundle.py` directly with no input;
+2. receive a complete `TASK_ACTION` payload containing command, context, behavioral instructions, and bundle-owned state;
+3. perform exactly that one material action;
+4. on completion, failure, or attempted end-turn, return the complete prior payload unchanged as the first JSON input line to the same bundle;
+5. the running bundle asks the post-action questionnaire and, when applicable, the end-turn router interactively;
+6. the bundle persists recorder/questionnaire/router actions and emits the next complete payload;
+7. router `CONTINUE` yields another `TASK_ACTION`; router `COMPLETE` or `IMPASSE` yields `FINAL_RESPONSE` authority only.
 
-A retrieval failure showed that connector-fetched source text was not equivalent to executable `/mnt/data` files. Retrieval of canonical source therefore became a bootstrap-discovery event producing one timestamped local bundle containing one coherent pinned snapshot when a runtime bundle needed to be built. Canonical relative paths are preserved.
-
-A passive JSON bundle still left model-managed extraction as a failure point. `scripts/runtime_bundle.py` therefore became an executable template that embeds the manifest, verifies it, owns the private derivative tree, internally dispatches recorder/questioner/router, and is the sole model-facing runtime entrypoint.
-
-### External model-Orchestrator phase
-
-To stop Worker free-running, an intermediate design added a model-Orchestrator identity gate, one-action Worker commands, Orchestrator-scoped end-turn routing, and a final-delivery packet after outer completion. This established important protections: the Worker could not own the user-facing boundary, action cadence became externally controlled, and final delivery used the newest execution record plus a canonical narrative heuristic.
-
-That phase was useful but redundant: the bundle already held deterministic control state and mostly used the model-Orchestrator as a relay.
-
-### Bundle becomes sole Orchestrator through action leases
-
-The model-Orchestrator layer was removed. The executable bundle itself is now the sole Orchestrator and the model is always a Worker acting under one current `WORKER_PAYLOAD`.
-
-A payload is an action lease with monotonically increasing sequence, unique `action_id`, one authority, one `next_instruction`, captured prompt, context, Worker rules, and an exact return contract. The authorities are `TASK_ACTION`, `CONTINUITY_RESPONSE`, and `FINAL_RESPONSE`.
-
-The central fail-closed rule is `NO CURRENT PAYLOAD = NO EXECUTION AUTHORITY`. Exactly one unconsumed lease may exist. A task-action lease is consumed before recorder/questioner/router processing; stale, duplicated, mismatched, or wrong-authority IDs are rejected; and a second lease cannot be issued until the first is consumed. Re-entering bootstrap replays an outstanding lease rather than duplicating authority. Control errors grant zero execution authority.
-
-After a nonterminal action or router `CONTINUE`, the bundle issues one new `TASK_ACTION`. Each protocol question gets its own `CONTINUITY_RESPONSE`, which cannot authorize task work. Terminal Worker `COMPLETE` or `IMPASSE`, after persistence of its `end_turn_result`, causes the bundle to resolve the newest record and issue one `FINAL_RESPONSE` containing the narrative heuristic and file-delivery context.
-
-The separate Orchestrator identity gate, Orchestrator questionnaire/router scope, `WORKER_TERMINAL_TO_ORCHESTRATOR`, outer completion, and `FINAL_DELIVERY_TO_ORCHESTRATOR` are superseded. Their protections remain through the lease state machine.
-
-### Reusable bundle freshness gate
-
-Unconditional per-turn runtime-bundle construction was found to be redundant and expensive. A previously constructed bundle already contains an exact coherent canonical snapshot and does not need to be rebuilt merely because a new governed user turn begins.
-
-The repository commit SHA is retained as exact provenance, but it is intentionally not the rebuild discriminator. A commit SHA changes when any part of the repository changes, including unrelated skills. The Git tree SHA for the canonical `execution-continuity-control/` directory changes only when that directory tree changes. It therefore became the freshness identity for reusable runtime bundles.
-
-Each constructed runtime bundle carries a machine-readable `EXECUTION_CONTINUITY_PIN` header containing both the construction `commit_sha` and the `skill_tree_sha`. The manifest's existing commit SHA continues to identify the exact source snapshot used for construction; the header's skill-tree SHA controls reuse.
-
-On first bootstrap immediately after construction, no GitHub comparison is performed because the just-built bundle is already known to match the exact source pin used to build it. On later initialization, the caller first locates an existing bundle, resolves current `main` and the current skill-subtree tree SHA, and compares the stored tree SHA. An equal tree SHA reuses the bundle even if `main` now points to a different repository commit. A mismatch, missing bundle, or malformed pin invalidates reuse and causes reconstruction from the current exact commit.
-
-This freshness check is deliberately earlier than canonical source acquisition. Only a mismatch pays the cost of obtaining the canonical source snapshot and constructing another runtime bundle.
-
-A persistent derivative cache, such as the ChatGPT Library, may preserve the exact runtime bundle across runtime reallocations. A cached copy is still noncanonical and must be materialized into the execution environment before execution when a local pathname is required. If only `/mnt/data` is available, reuse lasts only as long as that runtime artifact survives.
-
-### One-shot GitHub source archive and bootstrap split
-
-Per-file canonical retrieval remained mechanically expensive and created multiple opportunities for partial retrieval, truncation, connector mismatch, or mixed-snapshot reconstruction. The canonical repository currently contains only the execution-continuity skill tree, so GitHub's exact-commit repository ZIP is a natural transport container for the complete source snapshot.
-
-The bootstrap was therefore split into two layers:
-
-- `SKILL.md` is intentionally small. It resolves the current commit and skill-tree SHA, reuses a valid runtime bundle when the tree is unchanged, and otherwise provides one exact-commit archive download command.
-- `BUNDLE_INSTRUCTIONS.md` is carried inside that downloaded archive and contains the full operational contract formerly held in `SKILL.md`.
-
-The source archive is pinned by the exact commit SHA before download. It is a transport container only; it does not create a new authority identity. All construction inputs come from the one extracted archive. Individual canonical-file retrieval is no longer a normal reconstruction path.
-
-This preserves the earlier freshness optimization: an unchanged valid runtime bundle is reused before any archive download. When reconstruction is required, one archive transfer replaces the previous sequence of separate canonical file fetches.
-
-The executable runtime bundle remains a separate derivative artifact. The archive contains the canonical source needed to build it; `BUNDLE_INSTRUCTIONS.md` describes construction and execution, while the runtime bundle still embeds the executable-construction source set defined by `schemas/runtime-bundle.schema.json`.
-
-### Execution record and recorder/questioner/router responsibilities
-
-The execution record is an immutable sequence of complete snapshots. Each successor preserves prior actions unchanged, links its predecessor, and appends exactly one action. The recorder is the sole writer. It records invocation and starts the questioner but does not infer action meaning.
-
-The questioner owns structured post-action capture. `AQ1` is the mechanical end-turn discriminator. The router is invoked only after an end-turn-classified questionnaire is persisted, never writes the record, and returns both a directive and `router_cycle`. The questioner wraps the router object as `end_turn_result` and returns it to the recorder before the directive is acted on.
-
-The generic free-form interview was replaced by structured intent/action/plan/evidence/outcome/decision/counterfactual data using `UI#`, `A#`, `P#`, and `E#` references and a finite action ontology. This is post-action representation, not microscopic execution segmentation.
-
-### Final narrative and file delivery
-
-`FINAL_NARRATIVE_HEURISTIC` maps the captured prompt and newest record to the final response. The predecessor action count establishes `current_turn_action_range`, so current-turn work is primary while earlier project actions are prior history only when relevant to inherited state, dependencies, constraints, or changes.
-
-The heuristic prefers newer supported state, does not convert plans/self-report into accomplishments, includes meaningful gaps/impasse causes, compresses bookkeeping, and exposes real deliverables while suppressing internal continuity artifacts by default. The final UI response is not routed again because the terminal Worker action has already been recorded/questioned/routed.
+Payload state is opaque to the Worker. A SHA-256 over canonicalized payload content detects mutation. Separate controller-state and questionnaire/router state files are no longer part of the control protocol. Execution-record snapshots remain persisted because audit persistence is distinct from continuation state.
 
 ## Protected invariants
 
-1. Actual requested-task completion outranks procedural ceremony.
-2. Completion/mutation/persistence/validation claims require observable support.
-3. Do not reconstruct unrecorded history as contemporaneous evidence.
-4. Record a completed material action before another material action is authorized.
-5. Maintain one append-only project record; corrections append.
-6. Every successor preserves predecessor actions unchanged and appends exactly one action.
-7. Recorder is the sole execution-record writer and does not infer action meaning.
-8. Questioner captures canonical structured answers; `AQ1` alone discriminates end-turn attempts.
-9. Atomic decomposition is post-action representation, not an execution-delay gate.
-10. Router alone classifies `CONTINUE`/`COMPLETE`/`IMPASSE`, never writes the record, and returns complete audit data through the questioner.
-11. When reconstruction is required, pin one Git commit and obtain all canonical files from that one exact snapshot.
-12. Runtime derivatives never acquire canonical authority.
-13. Runtime-bundle construction is conditional: reuse a valid existing bundle when its stored skill-tree SHA matches the current canonical skill-tree SHA; construct only when no valid candidate exists or freshness fails.
-14. The executable bundle verifies/owns its derivative tree and internally controls recorder/questioner/router paths.
-15. The model never directly manages embedded continuity child scripts after runtime-bundle creation.
-16. The executable bundle itself is the sole Orchestrator; the model acts as Worker only under a current bundle-issued payload.
-17. `NO CURRENT PAYLOAD = NO EXECUTION AUTHORITY`.
-18. Exactly one unconsumed Worker lease may exist.
-19. Every lease has unique monotonically ordered `action_id`/sequence and exactly one authority.
-20. `TASK_ACTION` authorizes exactly one material action and must be consumed by matching `after-action --action-id` before another task action can be authorized.
-21. `CONTINUITY_RESPONSE` authorizes protocol answering only.
-22. `FINAL_RESPONSE` authorizes terminal UI delivery only.
-23. Missing/stale/duplicate/mismatched/wrong-authority lease IDs are rejected.
-24. A task lease is consumed before recorder/questioner/router processing, leaving no substantive execution authority during continuity processing.
-25. No new Worker lease may be issued while another is unconsumed.
-26. Bootstrap with an outstanding lease replays it rather than duplicating authority.
-27. Control/runtime errors grant zero execution authority.
-28. Capture the complete current user prompt unchanged before the first task lease.
-29. After every Worker material action, bundle re-entry precedes another Worker material action.
-30. Nonterminal questionnaire completion or router `CONTINUE` produces exactly one new `TASK_ACTION` lease.
-31. Worker `COMPLETE`/`IMPASSE` is terminal after its `end_turn_result` is persisted.
-32. Terminal routing resolves the newest execution-record snapshot before `FINAL_RESPONSE` issuance.
-33. `current_turn_action_range` distinguishes current-turn execution from prior project history where mechanically possible.
-34. `FINAL_NARRATIVE_HEURISTIC` governs evidence-based final synthesis and must not turn plans, intentions, questionnaire self-report, or unsupported claims into accomplishments.
-35. Newer supported state outranks stale conflicting prior state.
-36. Appropriate Worker-created/user-relevant files are exposed at final delivery; internal continuity artifacts are suppressed by default.
-37. Final UI delivery does not start another continuity cycle.
-38. Bundle-local control state is tied to the exact timestamped runtime bundle and pinned source commit SHA from which that bundle was constructed.
-39. Direct model-facing child-script dispatch remains superseded.
-40. The Git tree SHA of `execution-continuity-control/` is the reusable-runtime-bundle freshness discriminator; repository commit SHA remains provenance rather than freshness identity.
-41. A repository commit change with unchanged skill-tree SHA must not force runtime-bundle reconstruction.
-42. First bootstrap of a just-constructed runtime bundle does not perform a redundant freshness comparison.
-43. Later initialization of a previously constructed runtime bundle requires freshness comparison before `bootstrap`.
-44. A missing, malformed, wrong-scope, or mismatched runtime-bundle pin grants no execution authority and requires reconstruction from the current exact commit.
-45. Persistent cache copies of runtime bundles are runtime derivatives only; materialization or copying does not give them canonical authority.
-46. `SKILL.md` remains a minimal bootstrap entry point; the full post-bootstrap operational contract lives in canonical `BUNDLE_INSTRUCTIONS.md`.
-47. Canonical source reconstruction uses one exact-commit GitHub archive rather than independent per-file retrieval.
-48. Every reconstruction input used together must come from the same extracted archive selected by the pre-download commit pin.
-49. The archive is transport only; exact commit SHA remains provenance and skill-tree SHA remains runtime-bundle freshness identity.
-50. A source-archive acquisition failure must not be bypassed by assembling a partial or mixed canonical snapshot from individually retrieved files.
+1. Requested-task completion outranks procedural ceremony.
+2. Planning, explanation, or status does not substitute for available requested execution.
+3. Completion, mutation, persistence, retrieval, validation, and failure claims require observable support.
+4. Do not reconstruct unrecorded history as contemporaneous evidence.
+5. Record a completed material action before another material action is authorized.
+6. Maintain one logical append-only project execution record; corrections append.
+7. Recorder is the sole execution-record writer.
+8. Action-questionnaire capture and router classification remain logically separate responsibilities even though they are functions in one file.
+9. Router alone classifies `CONTINUE`, `COMPLETE`, or `IMPASSE` and never directly writes the execution record.
+10. Router cycles are persisted as `end_turn_result` actions before their directive is acted on.
+11. The runtime bundle is the sole Orchestrator; the model acts as Worker.
+12. `NO CURRENT PAYLOAD = NO EXECUTION AUTHORITY` for substantive task work.
+13. `TASK_ACTION` authorizes exactly one material action.
+14. The complete prior payload must be returned before another material action can be authorized.
+15. Payload continuation state is bundle-owned and opaque to the Worker.
+16. Protocol-question answering grants no substantive task authority.
+17. Router `CONTINUE` produces exactly one new `TASK_ACTION` payload.
+18. Router `COMPLETE` or `IMPASSE` produces `FINAL_RESPONSE` authority only.
+19. `FINAL_RESPONSE` authorizes final user-facing delivery only and is not routed through another continuity cycle.
+20. Runtime derivatives never acquire canonical source authority.
+21. The canonical runtime is one plain-text Python file; no encoded source container or dynamic decoding mechanism is permitted.
+22. There are no recorder/questioner/router child scripts in the canonical runtime architecture.
+23. There is no pseudo-subprocess/CLI compatibility layer among continuity components.
+24. GitHub Actions must compile-check and directly execute the canonical bundle before publishing its artifact pointer.
+25. Related source changes are staged together and `main` is moved only after the complete source set has been validated.
 
 ## Superseded mechanisms
 
-Do not restore these merely because older artifacts contain them:
+Do not restore these merely because historical revisions contain them:
 
-- universal history-first gating; per-turn history files; history templates/archive rotation;
-- timestamped canonical source filenames or greatest-filename-timestamp authority;
-- storage-surface collision rules as canonical identity;
-- mandatory microscopic action decomposition before execution;
-- free-form end-turn inference or generic eight-question interview;
-- recorder-owned interviewing; router-to-recorder writes; parallel router history; blank router placeholders;
-- treating connector retrieval as local runtime materialization;
-- passive JSON bundle requiring model extraction; direct model invocation of child paths; caller-supplied recorder child paths;
-- allowing multiple Worker material actions before bundle re-entry;
-- a separate model-Orchestrator identity/YES gate;
-- `ORCHESTRATE_WORKER`, Orchestrator-scoped recorder/questioner/router cycles, `WORKER_TERMINAL_TO_ORCHESTRATOR`, outer `COMPLETE`, or `FINAL_DELIVERY_TO_ORCHESTRATOR`;
-- any design in which the Worker may continue merely because no new script instruction was emitted;
-- issuing a second Worker authorization before the first lease is consumed;
-- routing the final UI response through another continuity cycle;
-- unconditional construction of a new runtime bundle merely because a new governed turn began;
-- using repository commit SHA alone as the rebuild discriminator when the canonical skill subtree is unchanged;
-- rechecking GitHub freshness immediately after constructing a runtime bundle from the just-resolved current source pin;
-- retrieving the canonical reconstruction source set through a sequence of independent per-file GitHub calls when an exact-commit source archive is available;
-- carrying the full operational contract in the bootstrap `SKILL.md`.
+- history-first/per-turn logging gates;
+- model-owned end-turn gating;
+- direct model invocation of recorder/questioner/router paths;
+- child-process bridges among continuity components;
+- wrapping child CLI programs in factories;
+- rewriting `sys.argv` to emulate script calls;
+- source encoding/decoding or dynamic source evaluation;
+- textual `__main__`-guard stripping;
+- model-facing `bootstrap`, `provide-prompt`, `after-action`, or `continuity-answer` subcommands;
+- a separate hidden controller-state file;
+- requiring the Worker to extract an action ID or state fragment from a payload;
+- reconstructing the runtime from stale or historical child scripts.
 
 ## Revision rule
 
-Before changing canon, resolve current `main`; acquire one exact current commit archive; read `SKILL.md`, `BUNDLE_INSTRUCTIONS.md`, this history, and affected canonical resources from that same archive; identify affected protected invariants; preserve or explicitly supersede them; stage complete replacements; verify coherence and archive-bootstrap correctness; then move `main`.
+Resolve current `main`, inspect the current single-file bundle, skill bootstrap, workflow, and this history, preserve or explicitly supersede affected invariants, validate the complete replacement source set before publication, then update canonical `main` atomically. Validate the resulting Actions artifact after publication.
