@@ -4,13 +4,7 @@
   "title": "Execution Continuity Project Record",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "record_id",
-    "snapshot_created_at",
-    "predecessor",
-    "entries",
-    "router_cycles"
-  ],
+  "required": ["record_id", "snapshot_created_at", "predecessor", "actions"],
   "properties": {
     "record_id": {
       "type": "string",
@@ -34,13 +28,10 @@
         }
       ]
     },
-    "entries": {
+    "actions": {
       "type": "array",
-      "items": {"$ref": "#/$defs/entry"}
-    },
-    "router_cycles": {
-      "type": "array",
-      "items": {"$ref": "#/$defs/router_cycle"}
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/action"}
     }
   },
   "$defs": {
@@ -48,138 +39,134 @@
       "type": "string",
       "minLength": 1
     },
-    "recorder": {
+    "source": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["pairs"],
       "properties": {
-        "pairs": {
-          "type": "array",
-          "minItems": 8,
-          "maxItems": 8,
-          "prefixItems": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["id", "question", "answer"],
-              "properties": {
-                "id": {"const": "R1"},
-                "question": {"const": "What just occurred?"},
-                "answer": {"$ref": "#/$defs/answer"}
-              }
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["id", "question", "answer"],
-              "properties": {
-                "id": {"const": "R2"},
-                "question": {"const": "What type was it?"},
-                "answer": {"$ref": "#/$defs/answer"}
-              }
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["id", "question", "answer"],
-              "properties": {
-                "id": {"const": "R3"},
-                "question": {"const": "Why did it occur?"},
-                "answer": {"$ref": "#/$defs/answer"}
-              }
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["id", "question", "answer"],
-              "properties": {
-                "id": {"const": "R4"},
-                "question": {"const": "What did it operate on?"},
-                "answer": {"$ref": "#/$defs/answer"}
-              }
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["id", "question", "answer"],
-              "properties": {
-                "id": {"const": "R5"},
-                "question": {"const": "What actually happened?"},
-                "answer": {"$ref": "#/$defs/answer"}
-              }
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["id", "question", "answer"],
-              "properties": {
-                "id": {"const": "R6"},
-                "question": {"const": "What artifacts or state changed?"},
-                "answer": {"$ref": "#/$defs/answer"}
-              }
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["id", "question", "answer"],
-              "properties": {
-                "id": {"const": "R7"},
-                "question": {"const": "What is its status?"},
-                "answer": {"$ref": "#/$defs/answer"}
-              }
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["id", "question", "answer"],
-              "properties": {
-                "id": {"const": "R8"},
-                "question": {"const": "What evidence supports that status or result?"},
-                "answer": {"$ref": "#/$defs/answer"}
-              }
-            }
-          ]
-        }
+        "chat_id": {"type": ["string", "null"]},
+        "chat_title": {"type": ["string", "null"]}
       }
+    },
+    "recorder_pairs": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": false,
+      "prefixItems": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "question", "answer"],
+          "properties": {
+            "id": {"const": "R1"},
+            "question": {"const": "What just occurred?"},
+            "answer": {"$ref": "#/$defs/answer"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "question", "answer"],
+          "properties": {
+            "id": {"const": "R2"},
+            "question": {"const": "What type was it?"},
+            "answer": {"$ref": "#/$defs/answer"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "question", "answer"],
+          "properties": {
+            "id": {"const": "R3"},
+            "question": {"const": "Why did it occur?"},
+            "answer": {"$ref": "#/$defs/answer"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "question", "answer"],
+          "properties": {
+            "id": {"const": "R4"},
+            "question": {"const": "What did it operate on?"},
+            "answer": {"$ref": "#/$defs/answer"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "question", "answer"],
+          "properties": {
+            "id": {"const": "R5"},
+            "question": {"const": "What actually happened?"},
+            "answer": {"$ref": "#/$defs/answer"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "question", "answer"],
+          "properties": {
+            "id": {"const": "R6"},
+            "question": {"const": "What artifacts or state changed?"},
+            "answer": {"$ref": "#/$defs/answer"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "question", "answer"],
+          "properties": {
+            "id": {"const": "R7"},
+            "question": {"const": "What is its status?"},
+            "answer": {"$ref": "#/$defs/answer"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "question", "answer"],
+          "properties": {
+            "id": {"const": "R8"},
+            "question": {"const": "What evidence supports that status or result?"},
+            "answer": {"$ref": "#/$defs/answer"}
+          }
+        }
+      ]
     },
     "router_pair": {
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "question", "answer"],
       "properties": {
-        "id": {
-          "type": "string",
-          "pattern": "^(Q|A|I|C)[0-9]+(\\.[0-9]+)?$"
-        },
-        "question": {
-          "type": "string",
-          "minLength": 1
-        },
-        "answer": {
-          "$ref": "#/$defs/answer"
-        }
+        "id": {"type": "string", "minLength": 1},
+        "question": {"type": "string", "minLength": 1},
+        "answer": {"$ref": "#/$defs/answer"}
       }
     },
-    "router_cycle": {
+    "material_action": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "cycle_id",
-        "scope",
-        "pairs",
-        "directive",
-        "instruction",
-        "impasse_evidence"
-      ],
+      "required": ["action_type", "sequence", "recorded_at", "scope", "pairs"],
       "properties": {
-        "cycle_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "scope": {
-          "type": "string",
-          "enum": ["worker", "orchestrator"]
-        },
+        "action_type": {"const": "material_action"},
+        "sequence": {"type": "integer", "minimum": 1},
+        "recorded_at": {"type": "string", "format": "date-time"},
+        "scope": {"type": "string", "enum": ["worker", "orchestrator"]},
+        "pairs": {"$ref": "#/$defs/recorder_pairs"},
+        "source": {"$ref": "#/$defs/source"}
+      }
+    },
+    "router_cycle_action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action_type", "sequence", "recorded_at", "scope", "pairs", "directive"],
+      "properties": {
+        "action_type": {"const": "router_cycle"},
+        "sequence": {"type": "integer", "minimum": 1},
+        "recorded_at": {"type": "string", "format": "date-time"},
+        "scope": {"type": "string", "enum": ["worker", "orchestrator"]},
         "pairs": {
           "type": "array",
           "minItems": 1,
@@ -189,43 +176,32 @@
           "type": "string",
           "enum": ["CONTINUE", "COMPLETE", "IMPASSE"]
         },
-        "instruction": {
-          "type": ["string", "null"]
+        "instruction": {"type": "string", "minLength": 1},
+        "impasse_evidence": {"type": "string", "minLength": 1},
+        "source": {"$ref": "#/$defs/source"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"directive": {"const": "CONTINUE"}},
+            "required": ["directive"]
+          },
+          "then": {"required": ["instruction"]}
         },
-        "impasse_evidence": {
-          "type": ["string", "null"]
+        {
+          "if": {
+            "properties": {"directive": {"const": "IMPASSE"}},
+            "required": ["directive"]
+          },
+          "then": {"required": ["impasse_evidence"]}
         }
-      }
+      ]
     },
-    "entry": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["sequence", "recorded_at", "scope", "recorder"],
-      "properties": {
-        "sequence": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "recorded_at": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "scope": {
-          "type": "string",
-          "enum": ["worker", "orchestrator"]
-        },
-        "recorder": {
-          "$ref": "#/$defs/recorder"
-        },
-        "source": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "chat_id": {"type": ["string", "null"]},
-            "chat_title": {"type": ["string", "null"]}
-          }
-        }
-      }
+    "action": {
+      "oneOf": [
+        {"$ref": "#/$defs/material_action"},
+        {"$ref": "#/$defs/router_cycle_action"}
+      ]
     }
   }
 }
