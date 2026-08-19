@@ -36,13 +36,13 @@ Premature stopping after one failed path, reporting intentions instead of acting
 
 ### Canonical source versus runtime copies
 
-Canonical scripts and runtime executables were separated. Each relevant turn uses a fresh local Runnable copied from the current canonical source. Runtime copies never acquire canonical authority.
+Canonical scripts and runtime executables were separated. Runtime copies never acquire canonical authority.
 
 ### Externalized Orchestrator gate
 
 A self-invoked router was bypassable because the same Worker owned both the decision to invoke the gate and the actual turn boundary. Control moved to a higher-scope Orchestrator.
 
-The Worker performs the substantive task but cannot actually end the user-facing turn. Worker stop attempts are simulated signals. The Orchestrator invokes continuity scripts, routes Worker-scoped answers, and is itself router-gated. Only outer Orchestrator `COMPLETE` permits actual termination.
+The Worker performs the substantive task but cannot actually end the user-facing turn. Worker stop attempts are simulated signals. The Orchestrator invokes continuity machinery, routes Worker-scoped answers, and is itself router-gated. Only outer Orchestrator `COMPLETE` permits actual termination.
 
 **Retained invariant:** the actor that owns actual termination is outside the Worker and is itself continuity-governed.
 
@@ -56,15 +56,27 @@ Timestamped canonical source filenames and storage-surface collision rules are s
 
 A later execution failure exposed an ambiguity in the phrase "copy canonical source into the execution environment": retrieving source through the GitHub connector did not itself create executable files under `/mnt/data`. The model could read canonical scripts yet never materialize or execute them.
 
-The bootstrap contract was therefore made explicit. Retrieval of canonical `SKILL.md` now instructs the caller to pin one `main` commit, retrieve every canonical dependency from that exact SHA, assemble all retrieved contents into one JSON runtime bundle, and write exactly one timestamped bundle instance into `/mnt/data` before continuity runtime execution.
+The bootstrap contract was therefore made explicit. Retrieval of canonical `SKILL.md` instructs the caller to pin one `main` commit, retrieve every canonical dependency from that exact SHA, and create exactly one timestamped local bundle representing that coherent snapshot.
 
-The bundle preserves canonical root-relative paths rather than flattening filenames. Its internal tree contains `SKILL.md`, `DESIGN_HISTORY.md`, both schema files under `schemas/`, and the three Python scripts under `scripts/`. `schemas/runtime-bundle.schema.json` provides the machine-readable bundle contract.
+The bundle preserves canonical root-relative paths rather than flattening filenames. Its embedded tree contains `SKILL.md`, `DESIGN_HISTORY.md`, both schema files under `schemas/`, and runtime/continuity scripts under `scripts/`.
 
-After materialization, the verified bundle becomes the sole local representation of that pinned canonical snapshot for the turn. Local Python files are emitted from that bundle beneath one timestamped derivative tree while preserving `schemas/` and `scripts/` subfolders. Later GitHub reads cannot silently replace bundle content or become independent runtime sources.
+**Retained invariants:** one coherent Git snapshot per turn; no mixed-revision runtime; runtime derivatives have no canonical authority; observable local materialization precedes script execution; canonical relative paths remain mechanically identifiable.
 
-This does not give the bundle canonical authority. GitHub repository + stable path + commit SHA remain canonical; the bundle and emitted Runnables are derivatives.
+### Executable bundle owns subscript materialization and dispatch
 
-**Retained invariants:** one coherent Git snapshot per turn; no mixed-revision runtime; runtime derivatives have no canonical authority; observable materialization precedes script execution; canonical relative paths remain mechanically identifiable.
+The first runtime-bundle design used a JSON document as the local snapshot and still required the model to extract embedded script text into executable child files. That left a second avoidable failure boundary: a model could successfully create the bundle yet fail to reconstruct, write, address, or invoke its subscripts.
+
+The bundle was therefore changed from a passive JSON container into one executable Python file. Canonical `scripts/runtime_bundle.py` is a deterministic template containing one payload sentinel. Bootstrap constructs a v2 manifest from the exact pinned canonical files, base64-encodes that manifest, substitutes it into the template exactly once, writes one timestamped `/mnt/data/execution-continuity-control_bundle_[timestamp].py`, and invokes `bootstrap`.
+
+The executable bundle verifies the embedded file set and Git blob SHAs, owns the private derivative tree, and becomes the sole model-facing continuity runtime entrypoint for the turn. The model no longer extracts or directly executes child scripts.
+
+The bundle exposes controlled dispatch commands for recorder, questioner, and router. It materializes exact embedded child source internally, preserves `scripts/` and `schemas/` paths, rejects caller replacement of recorder child paths, executes the selected canonical child with Python, relays child stdout/stderr and exit status, and leaves child-produced files/state in the execution environment.
+
+This keeps the existing recorder → questioner → router → questioner → recorder protocol intact while moving filesystem plumbing out of model discretion. `schemas/runtime-bundle.schema.json` now describes the embedded v2 manifest rather than the outer executable Python file.
+
+The bundle is still noncanonical. GitHub repository + stable path + commit SHA remain authoritative; the executable bundle and its private derivatives are runtime representations only.
+
+**Retained invariants:** one pinned snapshot per turn; no mixed-version children; model-visible protocol output remains the child script's output; child scripts keep their existing responsibilities; recorder remains the sole execution-record writer; runtime implementation details cannot acquire canonical authority.
 
 ### Explicit execution-record schema
 
@@ -96,29 +108,13 @@ The execution record therefore has one chronological `actions` stream with three
 
 The original eight generic free-form questions preserved broad descriptions such as what happened, why, status, and evidence, but they were poorly normalized for future decision modeling. They also encouraged narrative answers where a finite decision vocabulary was available.
 
-The questionnaire was replaced with a structured post-action decision record. It now captures:
+The questionnaire was replaced with a structured post-action decision record. It captures explicit end-turn classification; concise user intent; independently testable `UI#` intent items; ordered atomic `A#` actions; optional prior `P#` plan items; action-to-intent mappings; `E#` evidence; per-intent outcomes; plan/path divergence; decision bases; overall outcome; supported counterfactuals; and a constrained `NARRATIVE_MAPPING` note.
 
-- explicit end-turn classification;
-- concise user intent;
-- numbered independently testable user-intent items (`UI#`);
-- ordered atomic action units (`A#`);
-- whether a prior plan existed and, when it did, numbered plan items (`P#`);
-- action-to-intent mappings;
-- numbered evidence objects (`E#`);
-- per-intent outcomes and remaining gaps;
-- plan/path divergence and causes;
-- material decision-point bases;
-- overall activity outcome;
-- supported decision-boundary counterfactuals; and
-- a final constrained narrative mapping note.
+The atomic action vocabulary is intentionally finite even for meta-level work. Seven parent types (`ACQUIRE`, `TRANSFORM`, `EVALUATE`, `DECIDE`, `ACT`, `OBSERVE`, `COMMUNICATE`) have canonical subtypes. This is representational decomposition after an activity, not a mandate to interrupt execution after every tiny operation.
 
-The atomic action vocabulary is intentionally finite even for meta-level work. Seven parent types (`ACQUIRE`, `TRANSFORM`, `EVALUATE`, `DECIDE`, `ACT`, `OBSERVE`, `COMMUNICATE`) have canonical subtypes. This is representational decomposition after an activity, not a mandate to interrupt execution after every tiny operation. The earlier problem with mandatory atomic bookkeeping is therefore not reintroduced.
+Every enumerated question co-presents a canonical definition table. The final narrative note references existing structured identifiers and cannot introduce new actions, requirements, plans, or outcomes. It is a constrained post-action self-report, not raw chain-of-thought and not independent evidence.
 
-Every enumerated question co-presents a canonical definition table so classifications are selected against stable meanings rather than inferred from enum names alone. Free-form text is retained only where semantics cannot be usefully reduced to an enum, especially intent text, action targets, evidence references, short exception notes, and the final narrative mapping.
-
-The final `NARRATIVE_MAPPING` note is required because normalized graph-like fields alone do not preserve how the model understood the whole activity as a coherent sequence. The note must reference the already-created `UI#`, `A#`, `P#`, and `E#` identifiers and cannot introduce new actions, requirements, plans, or outcomes. It is treated as a constrained post-action self-report, not raw chain-of-thought and not independent evidence.
-
-The questioner is intentionally non-evaluative. It validates answer shape, canonical enum membership, identifier ordering, and internal references; it does not decide whether the model's answers are true. At completion it emits `QUESTIONER_ACTION_OVER` with the formatted questionnaire object. That signal means only that the interrogation action is complete.
+The questioner is intentionally non-evaluative. It validates answer shape, canonical enum membership, identifier ordering, and internal references; it does not decide whether the model's answers are true. At completion it emits `QUESTIONER_ACTION_OVER` with the formatted questionnaire object.
 
 **Retained invariants:** exact Q/A evidence remains first-class; end-turn detection remains mechanical; recorder remains sole persistent snapshot writer; questioner does not infer hidden reasons; structured decision data is cross-checkable against observable execution evidence; representational decomposition must not become an execution gate.
 
@@ -152,15 +148,20 @@ The questioner is intentionally non-evaluative. It validates answer shape, canon
 26. The Orchestrator remains task-domain neutral and is itself continuity-governed.
 27. Resolve one Git commit snapshot per governed turn and read all required canonical files from it.
 28. Canonical files use one stable path each; Git provides version history.
-29. Runtime Runnables are fresh derivatives with no canonical authority.
+29. Runtime derivatives have no canonical authority.
 30. Persistent record semantics are storage-provider neutral.
 31. Persistent record structure is controlled by the canonical JSON Schema plus recorder cross-snapshot invariants.
 32. Historical information is not redundantly restated in every new action object.
-33. Retrieval of canonical `SKILL.md` triggers complete runtime-bundle materialization before continuity runtime execution.
-34. Exactly one timestamped runtime bundle represents the pinned canonical Git snapshot locally for a governed turn.
-35. The runtime bundle preserves canonical root-relative paths, including `schemas/` and `scripts/` subfolder notation.
-36. Every local continuity Runnable for the turn is derived from the same verified bundle; later GitHub reads cannot become independent runtime sources.
-37. Bundle materialization and verification are observable prerequisites for claiming the continuity runtime was initialized.
+33. Retrieval of canonical `SKILL.md` triggers complete runtime-bundle construction before continuity runtime execution.
+34. Exactly one timestamped executable runtime bundle represents the pinned canonical Git snapshot locally for a governed turn.
+35. The embedded manifest preserves canonical root-relative paths, including `schemas/` and `scripts/` subfolder notation.
+36. All continuity child execution for the turn is derived from the same verified executable bundle; later GitHub reads cannot become independent runtime sources.
+37. Bundle construction, invocation, and `BUNDLE_READY` verification are observable prerequisites for claiming the continuity runtime was initialized.
+38. The model never extracts or directly manages embedded continuity child scripts after the executable bundle exists.
+39. `scripts/runtime_bundle.py` is the canonical executable-bundle template and contains exactly one payload substitution sentinel.
+40. The executable bundle owns its private derivative tree and verifies existing derivatives byte-for-byte before use.
+41. Recorder child paths are bundle-controlled; the caller cannot substitute a different questioner or router during bundle-dispatched recorder invocation.
+42. Bundle dispatch relays child stdout/stderr and exit status without replacing the child protocol, while child filesystem/state effects remain available in the execution environment.
 
 ## Superseded mechanisms
 
@@ -187,7 +188,10 @@ Do not restore these merely because older artifacts contain them:
 - treating a post-action narrative self-report as raw chain-of-thought or independent evidence;
 - treating connector retrieval of source text as equivalent to local runtime materialization;
 - independently fetching or copying individual runtime scripts after a verified turn bundle exists;
-- flattening canonical `scripts/` or `schemas/` paths into ambiguous local source identities.
+- flattening canonical `scripts/` or `schemas/` paths into ambiguous local source identities;
+- a passive JSON-only runtime bundle that still requires the model to extract executable children;
+- direct model invocation of bundle-derived child script paths;
+- caller-supplied recorder questioner/router paths when the recorder is invoked through the executable bundle.
 
 ## Revision rule
 
