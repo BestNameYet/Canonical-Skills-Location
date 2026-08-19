@@ -4,25 +4,11 @@
   "title": "Execution Continuity Project Record",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "project",
-    "snapshot_created_at",
-    "predecessor",
-    "entries"
-  ],
+  "required": ["record_id", "snapshot_created_at", "predecessor", "entries"],
   "properties": {
-    "project": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "title"],
-      "properties": {
-        "id": {
-          "type": ["string", "null"]
-        },
-        "title": {
-          "type": ["string", "null"]
-        }
-      }
+    "record_id": {
+      "type": "string",
+      "minLength": 1
     },
     "snapshot_created_at": {
       "type": "string",
@@ -30,47 +16,162 @@
     },
     "predecessor": {
       "oneOf": [
-        {
-          "type": "null"
-        },
+        {"type": "null"},
         {
           "type": "object",
           "additionalProperties": false,
           "required": ["filename", "sha256"],
           "properties": {
-            "filename": {
-              "type": "string",
-              "minLength": 1
-            },
-            "sha256": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{64}$"
-            }
+            "filename": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
           }
         }
       ]
     },
     "entries": {
       "type": "array",
-      "items": {
-        "$ref": "#/$defs/entry"
-      }
+      "items": {"$ref": "#/$defs/entry"}
     }
   },
   "$defs": {
+    "answer": {
+      "type": "string",
+      "minLength": 1
+    },
+    "router_pair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "question", "answer"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^(Q|A|I|C)[0-9]+(\\.[0-9]+)?$"
+        },
+        "question": {"type": "string", "minLength": 1},
+        "answer": {"$ref": "#/$defs/answer"}
+      }
+    },
+    "recorder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pairs"],
+      "properties": {
+        "pairs": {
+          "type": "array",
+          "minItems": 8,
+          "maxItems": 8,
+          "prefixItems": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "question", "answer"],
+              "properties": {
+                "id": {"const": "R1"},
+                "question": {"const": "What just occurred?"},
+                "answer": {"$ref": "#/$defs/answer"}
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "question", "answer"],
+              "properties": {
+                "id": {"const": "R2"},
+                "question": {"const": "What type was it?"},
+                "answer": {"$ref": "#/$defs/answer"}
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "question", "answer"],
+              "properties": {
+                "id": {"const": "R3"},
+                "question": {"const": "Why did it occur?"},
+                "answer": {"$ref": "#/$defs/answer"}
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "question", "answer"],
+              "properties": {
+                "id": {"const": "R4"},
+                "question": {"const": "What did it operate on?"},
+                "answer": {"$ref": "#/$defs/answer"}
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "question", "answer"],
+              "properties": {
+                "id": {"const": "R5"},
+                "question": {"const": "What actually happened?"},
+                "answer": {"$ref": "#/$defs/answer"}
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "question", "answer"],
+              "properties": {
+                "id": {"const": "R6"},
+                "question": {"const": "What artifacts or state changed?"},
+                "answer": {"$ref": "#/$defs/answer"}
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "question", "answer"],
+              "properties": {
+                "id": {"const": "R7"},
+                "question": {"const": "What is its status?"},
+                "answer": {"$ref": "#/$defs/answer"}
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "question", "answer"],
+              "properties": {
+                "id": {"const": "R8"},
+                "question": {"const": "What evidence supports that status or result?"},
+                "answer": {"$ref": "#/$defs/answer"}
+              }
+            }
+          ]
+        }
+      }
+    },
+    "router_cycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cycle_id", "pairs", "directive"],
+      "properties": {
+        "cycle_id": {"type": "string", "minLength": 1},
+        "pairs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/router_pair"}
+        },
+        "directive": {
+          "type": "string",
+          "enum": ["CONTINUE", "COMPLETE", "IMPASSE"]
+        },
+        "instruction": {
+          "type": ["string", "null"]
+        },
+        "impasse_evidence": {
+          "type": ["string", "null"]
+        }
+      }
+    },
     "entry": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "sequence",
-        "recorded_at",
-        "scope",
-        "kind",
-        "summary",
-        "outcome",
-        "status",
-        "evidence"
-      ],
+      "required": ["sequence", "recorded_at", "scope", "recorder"],
       "properties": {
         "sequence": {
           "type": "integer",
@@ -84,43 +185,19 @@
           "type": "string",
           "enum": ["worker", "orchestrator"]
         },
-        "kind": {
-          "type": "string",
-          "minLength": 1
+        "recorder": {
+          "$ref": "#/$defs/recorder"
         },
-        "summary": {
-          "type": "string",
-          "minLength": 1
-        },
-        "outcome": {
-          "type": "string",
-          "minLength": 1
-        },
-        "status": {
-          "type": "string",
-          "minLength": 1
-        },
-        "evidence": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1
-          }
+        "router": {
+          "$ref": "#/$defs/router_cycle"
         },
         "source": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "chat_id": {
-              "type": ["string", "null"]
-            },
-            "chat_title": {
-              "type": ["string", "null"]
-            }
+            "chat_id": {"type": ["string", "null"]},
+            "chat_title": {"type": ["string", "null"]}
           }
-        },
-        "data": {
-          "type": "object"
         }
       }
     }
