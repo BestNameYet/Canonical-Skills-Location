@@ -38,19 +38,6 @@
       "type": "string",
       "minLength": 1
     },
-    "router_pair": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "question", "answer"],
-      "properties": {
-        "id": {
-          "type": "string",
-          "pattern": "^(Q|A|I|C)[0-9]+(\\.[0-9]+)?$"
-        },
-        "question": {"type": "string", "minLength": 1},
-        "answer": {"$ref": "#/$defs/answer"}
-      }
-    },
     "recorder": {
       "type": "object",
       "additionalProperties": false,
@@ -145,10 +132,23 @@
         }
       }
     },
+    "router_pair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "question", "answer"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^(Q|A|I|C)[0-9]+(\\.[0-9]+)?$"
+        },
+        "question": {"type": "string", "minLength": 1},
+        "answer": {"$ref": "#/$defs/answer"}
+      }
+    },
     "router_cycle": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cycle_id", "pairs", "directive"],
+      "required": ["cycle_id", "pairs", "directive", "instruction", "impasse_evidence"],
       "properties": {
         "cycle_id": {"type": "string", "minLength": 1},
         "pairs": {
@@ -168,10 +168,8 @@
         }
       }
     },
-    "entry": {
+    "base_entry": {
       "type": "object",
-      "additionalProperties": false,
-      "required": ["sequence", "recorded_at", "scope", "recorder"],
       "properties": {
         "sequence": {
           "type": "integer",
@@ -185,12 +183,6 @@
           "type": "string",
           "enum": ["worker", "orchestrator"]
         },
-        "recorder": {
-          "$ref": "#/$defs/recorder"
-        },
-        "router": {
-          "$ref": "#/$defs/router_cycle"
-        },
         "source": {
           "type": "object",
           "additionalProperties": false,
@@ -199,7 +191,65 @@
             "chat_title": {"type": ["string", "null"]}
           }
         }
-      }
+      },
+      "required": ["sequence", "recorded_at", "scope"]
+    },
+    "material_entry": {
+      "allOf": [
+        {"$ref": "#/$defs/base_entry"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["entry_type", "sequence", "recorded_at", "scope", "recorder"],
+          "properties": {
+            "entry_type": {"const": "material_unit"},
+            "sequence": {"type": "integer", "minimum": 1},
+            "recorded_at": {"type": "string", "format": "date-time"},
+            "scope": {"type": "string", "enum": ["worker", "orchestrator"]},
+            "recorder": {"$ref": "#/$defs/recorder"},
+            "source": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "chat_id": {"type": ["string", "null"]},
+                "chat_title": {"type": ["string", "null"]}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "router_entry": {
+      "allOf": [
+        {"$ref": "#/$defs/base_entry"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["entry_type", "sequence", "recorded_at", "scope", "recorder", "router"],
+          "properties": {
+            "entry_type": {"const": "router_cycle"},
+            "sequence": {"type": "integer", "minimum": 1},
+            "recorded_at": {"type": "string", "format": "date-time"},
+            "scope": {"type": "string", "enum": ["worker", "orchestrator"]},
+            "recorder": {"$ref": "#/$defs/recorder"},
+            "router": {"$ref": "#/$defs/router_cycle"},
+            "source": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "chat_id": {"type": ["string", "null"]},
+                "chat_title": {"type": ["string", "null"]}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "entry": {
+      "oneOf": [
+        {"$ref": "#/$defs/material_entry"},
+        {"$ref": "#/$defs/router_entry"}
+      ]
     }
   }
 }
