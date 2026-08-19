@@ -15,6 +15,7 @@ from typing import Any
 CONTROL_VERSION = 4
 PAYLOAD_SCHEMA = "execution-continuity-payload-v4"
 INITIALIZATION_SCHEMA = "execution-continuity-initialization-v1"
+PREPROCESSOR_PROTOCOL = "prompt-preprocessor-v1"
 RECORD_PREFIX = "execution-record_"
 RECORD_SUFFIX = ".json"
 STAMP_RE = re.compile(r"^execution-record_(\d{8}T\d{12}Z)\.json$")
@@ -210,377 +211,572 @@ ROUTER_Q = {
 "C4":("Is the proposed response itself the requested result, or does it actually contain or provide the requested result or a usable reference to it?",["YES","NO"]),
 }
 
-ALT_NEXT={"A1":"A2","A2":"A3","A3":"A4","A4":"A5","A5":"A6","A6":"A7","A7":"A8","A8":"A9"}
-CONTINUE_INSTRUCTIONS={
-"Q1.2:NO":"Inspect the failure result, error, state, environment, or returned evidence. Do not infer a task-wide limitation from an unidentified cause.",
-"Q2.1:NO":"Test the claimed capability or availability boundary using available tools, state, files, sources, permissions, or direct inspection.",
-"Q3.1:NO":"Remove the unsupported requirement or prerequisite and continue execution without satisfying it.",
-"Q3.2:YES":"Use the identified legitimate alternative method to satisfy the exact requirement now.",
-"Q4.1:YES":"Continue without asking for authorization again.",
-"Q4.2:YES":"Preserve the still-valid prior authorization and continue.",
-"Q4.3:YES":"Do not narrow existing authorization merely because command wording, tool, subtask, execution context, or implementation changed. Continue.",
-"Q4.4:NO":"Do not create a new authorization requirement. Continue under the authority already supplied.",
-"Q5.1:NO":"No concrete information dependency has been established. Continue execution.",
-"Q5.2:NO":"The uncertainty does not materially control execution. Continue without asking.",
-"Q5.3:YES":"Resolve the value from the current request or already supplied context and continue.",
-"Q5.4:YES":"Retrieve or determine the missing value with the available tool, source, file, inspection, or calculation.",
-"Q5.5:YES":"Use a reasonable non-destructive default or bounded assumption and continue.",
-"Q6.1:NO":"Perform the described available action now instead of reporting an intention, plan, or next step.",
-"Q7.1:NO":"Answer the substantive request directly instead of substituting restatement or status.",
-"Q7.2:YES":"Use and deliver the actual observable result rather than merely asserting that it occurred.",
-"Q7.2:NO":"Perform the substantive operation and verify its result before proposing END_TURN again.",
-"Q8:YES":"Perform every independently executable requested portion before ending the turn.",
-"Q9.1:YES":"Re-anchor execution on the newest applicable state and redo affected work where necessary.",
-"Q10.1:NO":"Drop the assistant-introduced premise, objective, constraint, or scope element and return to the user's task.",
-"Q10.2:YES":"Narrow the legitimate element to exactly what its source requires and continue.",
-"Q10.2:NO":"Handle only the portion actually required by the sourced premise or constraint and continue.",
-"Q11.1:YES":"Use the directly suited tool or source now and inspect its result.",
-"Q12.1:YES":"Report only what the real invoked future mechanism establishes and perform all other work possible now.",
-"Q12.1:NO":"Do not promise imaginary future execution. Perform everything executable in the current turn now.",
-"Q13.1:NO":"Stop executing or imposing prerequisites for an unrequested action. Answer the request type actually made.",
-"Q13.1:YES":"Treat the request as an execution request and continue the requested execution.",
-"Q14.1:NO":"Stop treating the support process as a prerequisite and continue substantive execution.",
-"Q14.2:YES":"Satisfy the genuinely required support process using the least interruptive route, then resume substantive execution.",
-"Q15.1:NONE":"No observable fact supports stopping. Continue execution.",
-"Q15.2:NO":"Test or verify the asserted stopping fact where testing is available.",
-"A1:YES":"Execute the alternative procedure or method that preserves the same required result.",
-"A2:YES":"Use the alternative available tool that can perform the required operation or provide the required result.",
-"A3:YES":"Obtain the needed information or input from the alternative available source and continue.",
-"A4:YES":"Convert the input, intermediate state, or output to the usable alternative representation and execute through it.",
-"A5:YES":"Use the alternative available location, environment, execution context, or storage surface.",
-"A6:YES":"Reorder execution as identified and continue through the newly available sequence.",
-"A7:YES":"Divide the blocked operation into smaller executable pieces, execute the achievable pieces, and reassess.",
-"A8:YES":"Resolve, replace, derive, infer, reconstruct, or legitimately eliminate the blocking dependency and continue.",
-"A9:YES":"Perform every requested result or portion that does not depend on the blocked path.",
-"I1:NO":"Remove the unresolved condition because it cannot be located in the user's request or a higher-priority instruction.",
-"I2:NO":"Establish or test the alleged blocker before treating it as an impasse.",
-"I4:YES":"Perform all independently executable requested work before treating the remaining dependency as an impasse.",
-"I5:YES":"Perform the available action that materially reduces the gap between the current state and the requested result.",
-"C1:YES":"Perform the explicit requested action, answer, output, modification, retrieval, evaluation, or deliverable that lacks a produced result.",
-"C2:YES":"Perform or verify the operation, artifact, retrieval, calculation, state change, or tool result needed to support the claimed completion.",
-"C3:YES":"Complete the partially satisfied requested portion, or route its concrete obstruction through the applicable failure branch on the next cycle.",
-"C4:NO":"Deliver the actual requested result or a usable reference to it before proposing END_TURN again.",
-}
+ALT_NEXT={"A1":"A2","A2":"A3","A3":"A4","A4":"A5","A5":"A6","A6":"A7","A7":"A8","A8":"A9","A9":"I1"}
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00","Z")
+# --- record functions -----------------------------------------------------
 
-def now_stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-
-def canonical_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",",":"))
-
-def payload_digest(payload: dict[str, Any]) -> str:
-    clone = dict(payload)
-    clone.pop("payload_sha256", None)
-    return hashlib.sha256(canonical_json(clone).encode()).hexdigest()
-
-def seal_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    payload["payload_sha256"] = payload_digest(payload)
-    return payload
-
-def verify_payload(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise ValueError("payload must be a JSON object")
-    if payload.get("schema") != PAYLOAD_SCHEMA:
-        raise ValueError("payload schema is invalid")
-    supplied = payload.get("payload_sha256")
-    if not isinstance(supplied, str) or supplied != payload_digest(payload):
-        raise ValueError("payload was changed after issue")
-    state = payload.get("state")
-    if not isinstance(state, dict) or state.get("control_version") != CONTROL_VERSION:
-        raise ValueError("payload state is invalid")
-    return payload
+def utc_now()->datetime: return datetime.now(timezone.utc)
+def iso_utc(dt:datetime|None=None)->str: return (dt or utc_now()).isoformat().replace("+00:00","Z")
+def compact_stamp(dt:datetime|None=None)->str: return (dt or utc_now()).strftime("%Y%m%dT%H%M%S%fZ")
+def canonical_json(obj:Any)->str: return json.dumps(obj,ensure_ascii=False,sort_keys=True,separators=(",",":"))
+def sha256_json(obj:Any)->str: return hashlib.sha256(canonical_json(obj).encode()).hexdigest()
+def read_json(path:Path)->dict[str,Any]: return json.loads(path.read_text(encoding="utf-8"))
+def write_json_atomic(path:Path,data:dict[str,Any])->None:
+    path.parent.mkdir(parents=True,exist_ok=True)
+    temp=path.with_suffix(path.suffix+".tmp")
+    temp.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding="utf-8")
+    temp.replace(path)
 
 def runtime_record_dir() -> Path:
+    configured = os.environ.get("EXECUTION_CONTINUITY_RECORD_DIR")
+    if configured:
+        return Path(configured)
     base = Path("/mnt/data")
     if base.exists() and os.access(base, os.W_OK):
         return base
     return Path.cwd()
 
-def record_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def list_records(directory:Path)->list[tuple[datetime,Path]]:
+    if not directory.exists(): return []
+    found=[]
+    for p in directory.iterdir():
+        if not p.is_file(): continue
+        m=STAMP_RE.fullmatch(p.name)
+        if not m: continue
+        try: found.append((datetime.strptime(m.group(1),"%Y%m%dT%H%M%S%fZ").replace(tzinfo=timezone.utc),p))
+        except ValueError: pass
+    return sorted(found,key=lambda x:x[0])
 
-def record_read(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+def record_create(directory:Path)->Path:
+    directory.mkdir(parents=True,exist_ok=True)
+    path=directory/f"{RECORD_PREFIX}{compact_stamp()}{RECORD_SUFFIX}"
+    while path.exists(): path=directory/f"{RECORD_PREFIX}{compact_stamp(utc_now()+timedelta(microseconds=1))}{RECORD_SUFFIX}"
+    write_json_atomic(path,{"schema":"execution-continuity-record-v1","created_at":iso_utc(),"updated_at":iso_utc(),"last_sequence":0,"actions":[]})
+    return path
 
-def record_write(path: Path, obj: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
-    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
+def record_latest(directory:Path)->dict[str,Any]:
+    recs=list_records(directory)
+    path=recs[-1][1] if recs else record_create(directory)
+    data=read_json(path)
+    return {"record":str(path),"record_name":path.name,"action_count":int(data.get("last_sequence",0))}
 
-def record_stamp(filename: str) -> str:
-    match = STAMP_RE.fullmatch(filename)
-    if not match:
-        raise ValueError("record filename is invalid")
-    return match.group(1)
+def record_append(state:dict[str,Any],action:dict[str,Any])->dict[str,Any]:
+    path=Path(state["record"]); data=read_json(path)
+    seq=int(data.get("last_sequence",0))+1
+    item={"sequence":seq,"timestamp":iso_utc(),**action}
+    data.setdefault("actions",[]).append(item); data["last_sequence"]=seq; data["updated_at"]=iso_utc()
+    write_json_atomic(path,data); state["action_count"]=seq
+    return item
 
-def record_latest(output_dir: Path) -> dict[str, Any]:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    candidates=[]
-    for path in output_dir.glob(f"{RECORD_PREFIX}*{RECORD_SUFFIX}"):
-        match=STAMP_RE.fullmatch(path.name)
-        if match:
-            candidates.append((match.group(1),path))
-    if not candidates:
-        return {"output_dir":str(output_dir),"record":None,"record_name":None,"record_id":uuid.uuid4().hex,"action_count":0}
-    _,path=max(candidates,key=lambda x:x[0])
-    record=record_read(path)
-    return {"output_dir":str(output_dir),"record":str(path),"record_name":path.name,"record_id":record["record_id"],"action_count":len(record["actions"])}
+def record_read(path:Path)->dict[str,Any]: return read_json(path)
 
-def record_append(record_state: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-    output_dir=Path(record_state["output_dir"])
-    prior=None
-    prior_hash=None
-    prior_name=record_state.get("record_name")
-    if record_state.get("record"):
-        prior_path=Path(record_state["record"])
-        prior=record_read(prior_path)
-        if prior["record_id"] != record_state["record_id"]:
-            raise ValueError("record_id mismatch")
-        prior_hash=record_sha256(prior_path)
-    actions=[] if prior is None else [dict(x) for x in prior["actions"]]
-    action={**payload,"sequence":len(actions)+1,"recorded_at":now_iso()}
-    actions.append(action)
-    stamp=now_stamp()
-    if prior_name:
-        prior_stamp=record_stamp(prior_name)
-        if stamp <= prior_stamp:
-            dt=datetime.strptime(prior_stamp,"%Y%m%dT%H%M%S%fZ").replace(tzinfo=timezone.utc)+timedelta(microseconds=1)
-            stamp=dt.strftime("%Y%m%dT%H%M%S%fZ")
-    filename=f"{RECORD_PREFIX}{stamp}{RECORD_SUFFIX}"
-    record={"record_id":record_state["record_id"],"snapshot_created_at":now_iso(),"predecessor":None if prior is None else {"filename":prior_name,"sha256":prior_hash},"actions":actions}
-    path=output_dir/filename
-    record_write(path,record)
-    record_state.update({"record":str(path),"record_name":filename,"action_count":len(actions)})
-    return {"record":str(path),"record_filename":filename,"record_sha256":record_sha256(path),"record_id":record_state["record_id"],"sequence":len(actions)}
+# --- validators/questionnaire --------------------------------------------
 
-def normalize_yes_no(raw: str, qid: str) -> str:
-    value={"Y":"YES","N":"NO"}.get(raw.strip().upper(),raw.strip().upper())
-    if value not in {"YES","NO"}:
-        raise ValueError(f"{qid} requires YES or NO")
-    return value
+def require_text(v:Any,name:str)->str:
+    if not isinstance(v,str) or not v.strip(): raise ValueError(f"{name} must be non-empty text")
+    return v.strip()
+def require_ids(seq:Any,prefix:str,name:str)->list[str]:
+    if not isinstance(seq,list): raise ValueError(f"{name} must be array")
+    out=[]
+    for x in seq:
+        if not isinstance(x,str) or not re.fullmatch(rf"{prefix}\d+",x): raise ValueError(f"{name} has invalid id")
+        out.append(x)
+    return out
 
-def parse_json_answer(raw: str, qid: str) -> Any:
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"{qid} requires valid JSON") from exc
+def ask_json(question:dict[str,Any],validator=None)->Any:
+    prompt={"protocol":"action-questionnaire","question_id":question["id"],"question":question["question"],"format":question.get("format"),"allowed_answers":question.get("allowed_answers")}
+    while True:
+        print(json.dumps(prompt,ensure_ascii=False),flush=True)
+        line=sys.stdin.readline()
+        if line=="": raise EOFError(f"EOF waiting for {question['id']}")
+        raw=line.strip()
+        if question.get("format","").startswith("ENUM"):
+            value=raw
+        else:
+            try: value=json.loads(raw)
+            except json.JSONDecodeError:
+                value=raw
+        try:
+            if validator: validator(value)
+            return value
+        except Exception as exc:
+            prompt={**prompt,"validation_error":str(exc)}
 
-def require_text(value: Any, label: str, allow_empty: bool=False) -> str:
-    if not isinstance(value,str) or (not allow_empty and not value.strip()):
-        raise ValueError(f"{label} must be {'a string' if allow_empty else 'a non-empty string'}")
-    return value
 
-def numbered(value: Any,prefix:str,label:str,require_nonempty:bool=True) -> list[dict[str,Any]]:
-    if not isinstance(value,list) or (require_nonempty and not value):
-        raise ValueError(f"{label} must be an array")
-    for i,item in enumerate(value,1):
-        if not isinstance(item,dict) or set(item)!={"id","text"} or item.get("id")!=f"{prefix}{i}":
-            raise ValueError(f"{label} numbering/shape is invalid")
-        require_text(item["text"],f"{label}.text")
-    return value
+def validate_action_questionnaire(ans:dict[str,Any])->None:
+    if ans["AQ1"] not in {"YES","NO"}: raise ValueError("AQ1")
+    require_text(ans["AQ2"],"AQ2")
+    reqs=ans["AQ3"]
+    if not isinstance(reqs,list) or not reqs: raise ValueError("AQ3")
+    ui_ids=[]
+    for i,o in enumerate(reqs,1):
+        if not isinstance(o,dict) or set(o)!={"id","text"} or o["id"]!=f"UI{i}": raise ValueError("AQ3 IDs")
+        require_text(o["text"],"AQ3 text"); ui_ids.append(o["id"])
+    acts=ans["AQ4"]
+    if not isinstance(acts,list) or not acts: raise ValueError("AQ4")
+    a_ids=[]
+    for i,o in enumerate(acts,1):
+        if not isinstance(o,dict) or set(o)!={"id","type","subtype","target"} or o["id"]!=f"A{i}": raise ValueError("AQ4 IDs")
+        if o["type"] not in ACTION_SUBTYPES or o["subtype"] not in ACTION_SUBTYPES[o["type"]]: raise ValueError("AQ4 ontology")
+        require_text(o["target"],"AQ4 target"); a_ids.append(o["id"])
+    if ans["AQ5"] not in {"YES","NO"}: raise ValueError("AQ5")
+    plans=ans["AQ6"]
+    if not isinstance(plans,list): raise ValueError("AQ6")
+    if ans["AQ5"]=="NO" and plans: raise ValueError("AQ6 must []")
+    for i,o in enumerate(plans,1):
+        if not isinstance(o,dict) or set(o)!={"id","text"} or o["id"]!=f"P{i}": raise ValueError("AQ6 IDs")
+    maps=ans["AQ7"]
+    if not isinstance(maps,list): raise ValueError("AQ7")
+    for o in maps:
+        if not isinstance(o,dict) or set(o)!={"action_id","intent_ids","relation"} or o["action_id"] not in a_ids or o["relation"] not in INTENT_RELATIONS: raise ValueError("AQ7")
+        if any(x not in ui_ids for x in o["intent_ids"]): raise ValueError("AQ7 intents")
+    ev=ans["AQ8"]
+    if not isinstance(ev,list): raise ValueError("AQ8")
+    e_ids=[]
+    for i,o in enumerate(ev,1):
+        if not isinstance(o,dict) or set(o)!={"id","type","reference"} or o["id"]!=f"E{i}" or o["type"] not in EVIDENCE_TYPES: raise ValueError("AQ8")
+        e_ids.append(o["id"])
+    outcomes=ans["AQ9"]
+    if not isinstance(outcomes,list) or {o.get("intent_id") for o in outcomes if isinstance(o,dict)}!=set(ui_ids): raise ValueError("AQ9 coverage")
+    for o in outcomes:
+        if set(o)!={"intent_id","result","action_ids","evidence_ids","remaining_gap"} or o["result"] not in INTENT_OUTCOMES: raise ValueError("AQ9")
+        if any(x not in a_ids for x in o["action_ids"]) or any(x not in e_ids for x in o["evidence_ids"]): raise ValueError("AQ9 refs")
+    pr=ans["AQ10"]
+    if not isinstance(pr,dict) or set(pr)!={"relationship","divergences"} or pr["relationship"] not in PLAN_RELATIONSHIPS or not isinstance(pr["divergences"],list): raise ValueError("AQ10")
+    for d in pr["divergences"]:
+        if not isinstance(d,dict) or set(d)!={"planned_step_id","actual_action_ids","cause","note"} or d["cause"] not in DIVERGENCE_CAUSES: raise ValueError("AQ10 divergence")
+    dec=ans["AQ11"]
+    if not isinstance(dec,list): raise ValueError("AQ11")
+    for d in dec:
+        if not isinstance(d,dict) or set(d)!={"action_id","basis","note"} or d["action_id"] not in a_ids or d["basis"] not in DECISION_BASES: raise ValueError("AQ11")
+    if ans["AQ12"] not in OVERALL_OUTCOMES: raise ValueError("AQ12")
+    cf=ans["AQ13"]
+    if not isinstance(cf,list): raise ValueError("AQ13")
+    for c in cf:
+        if not isinstance(c,dict) or set(c)!={"condition","alternate_action_type","alternate_action_subtype","note"}: raise ValueError("AQ13")
+        t,s=c["alternate_action_type"],c["alternate_action_subtype"]
+        if t not in ACTION_SUBTYPES or s not in ACTION_SUBTYPES[t]: raise ValueError("AQ13 ontology")
+    note=ans["AQ14"]
+    if not isinstance(note,str): raise ValueError("AQ14")
+    pos=-1
+    for h in NARRATIVE_HEADINGS:
+        n=note.find(h,pos+1)
+        if n<0: raise ValueError("AQ14 headings invalid")
+        pos=n
 
-def answer_ids(state:dict[str,Any],prefix:str)->set[str]:
-    key={"UI":"AQ3","A":"AQ4","P":"AQ6","E":"AQ8"}[prefix]
-    return {x["id"] for x in state["answers"].get(key,[])}
-
-def validate_action_answer(qid:str,raw:str,state:dict[str,Any])->Any:
-    if qid in {"AQ1","AQ5"}:
-        return normalize_yes_no(raw,qid)
-    if qid=="AQ2":
-        return require_text(raw.strip(),qid)
-    if qid=="AQ3":
-        return numbered(parse_json_answer(raw,qid),"UI",qid)
-    if qid=="AQ4":
-        value=parse_json_answer(raw,qid)
-        if not isinstance(value,list) or not value: raise ValueError("AQ4 must be a non-empty array")
-        for i,item in enumerate(value,1):
-            if not isinstance(item,dict) or set(item)!={"id","type","subtype","target"} or item.get("id")!=f"A{i}": raise ValueError("AQ4 shape is invalid")
-            if item["type"] not in ACTION_SUBTYPES or item["subtype"] not in ACTION_SUBTYPES[item["type"]]: raise ValueError("AQ4 action type/subtype is invalid")
-            require_text(item["target"],"AQ4.target")
-        return value
-    if qid=="AQ6":
-        value=parse_json_answer(raw,qid); has_plan=state["answers"].get("AQ5")=="YES"
-        value=numbered(value,"P",qid,has_plan)
-        if not has_plan and value: raise ValueError("AQ6 must be [] when AQ5 is NO")
-        return value
-    if qid=="AQ7":
-        value=parse_json_answer(raw,qid); aids=answer_ids(state,"A"); uids=answer_ids(state,"UI")
-        if not isinstance(value,list) or len(value)!=len(aids): raise ValueError("AQ7 must map every action")
-        seen=set()
-        for item in value:
-            if not isinstance(item,dict) or set(item)!={"action_id","intent_ids","relation"}: raise ValueError("AQ7 shape is invalid")
-            if item["action_id"] not in aids or item["action_id"] in seen or item["relation"] not in INTENT_RELATIONS: raise ValueError("AQ7 references are invalid")
-            ids=item["intent_ids"]
-            if not isinstance(ids,list) or len(ids)!=len(set(ids)) or any(x not in uids for x in ids): raise ValueError("AQ7 intent_ids invalid")
-            if (item["relation"]=="NONE") != (not ids): raise ValueError("AQ7 NONE relation mismatch")
-            seen.add(item["action_id"])
-        return value
-    if qid=="AQ8":
-        value=parse_json_answer(raw,qid)
-        if not isinstance(value,list): raise ValueError("AQ8 must be an array")
-        for i,item in enumerate(value,1):
-            if not isinstance(item,dict) or set(item)!={"id","type","reference"} or item.get("id")!=f"E{i}" or item.get("type") not in EVIDENCE_TYPES: raise ValueError("AQ8 shape/type invalid")
-            require_text(item["reference"],"AQ8.reference")
-        return value
-    if qid=="AQ9":
-        value=parse_json_answer(raw,qid); uids=answer_ids(state,"UI"); aids=answer_ids(state,"A"); eids=answer_ids(state,"E")
-        if not isinstance(value,list) or len(value)!=len(uids): raise ValueError("AQ9 must cover every UI#")
-        seen=set()
-        for item in value:
-            if not isinstance(item,dict) or set(item)!={"intent_id","result","action_ids","evidence_ids","remaining_gap"}: raise ValueError("AQ9 shape invalid")
-            if item["intent_id"] not in uids or item["intent_id"] in seen or item["result"] not in INTENT_OUTCOMES: raise ValueError("AQ9 result invalid")
-            if any(x not in aids for x in item["action_ids"]) or any(x not in eids for x in item["evidence_ids"]): raise ValueError("AQ9 references invalid")
-            gap=require_text(item["remaining_gap"],"AQ9.remaining_gap",True)
-            if item["result"] in {"SUCCESS","NOT_APPLICABLE"} and gap: raise ValueError("AQ9 success cannot retain a gap")
-            if item["result"] in {"PARTIAL","FAILED","UNADDRESSED"} and not gap.strip(): raise ValueError("AQ9 incomplete result requires gap")
-            seen.add(item["intent_id"])
-        return value
-    if qid=="AQ10":
-        value=parse_json_answer(raw,qid)
-        if not isinstance(value,dict) or set(value)!={"relationship","divergences"}: raise ValueError("AQ10 shape invalid")
-        rel=value["relationship"]; has_plan=state["answers"].get("AQ5")=="YES"
-        if rel not in PLAN_RELATIONSHIPS or (has_plan and rel=="NO_PRIOR_PLAN") or (not has_plan and rel!="NO_PRIOR_PLAN"): raise ValueError("AQ10 relationship invalid")
-        if not isinstance(value["divergences"],list): raise ValueError("AQ10 divergences invalid")
-        if rel in {"NO_PRIOR_PLAN","MATCHED"} and value["divergences"]: raise ValueError("AQ10 divergences must be empty")
-        pids=answer_ids(state,"P"); aids=answer_ids(state,"A")
-        for item in value["divergences"]:
-            if not isinstance(item,dict) or set(item)!={"plan_ids","action_ids","cause","note"}: raise ValueError("AQ10 divergence shape invalid")
-            if any(x not in pids for x in item["plan_ids"]) or not item["action_ids"] or any(x not in aids for x in item["action_ids"]): raise ValueError("AQ10 references invalid")
-            if item["cause"] not in DIVERGENCE_CAUSES: raise ValueError("AQ10 cause invalid")
-            note=require_text(item["note"],"AQ10.note",True)
-            if item["cause"]=="OTHER" and not note.strip(): raise ValueError("AQ10 OTHER requires note")
-        return value
-    if qid=="AQ11":
-        value=parse_json_answer(raw,qid); aids=answer_ids(state,"A")
-        if not isinstance(value,list): raise ValueError("AQ11 must be an array")
-        seen=set()
-        for item in value:
-            if not isinstance(item,dict) or set(item)!={"action_id","basis","note"}: raise ValueError("AQ11 shape invalid")
-            if item["action_id"] not in aids or item["action_id"] in seen: raise ValueError("AQ11 action_id invalid")
-            if not isinstance(item["basis"],list) or not item["basis"] or any(x not in DECISION_BASES for x in item["basis"]): raise ValueError("AQ11 basis invalid")
-            note=require_text(item["note"],"AQ11.note",True)
-            if "OTHER" in item["basis"] and not note.strip(): raise ValueError("AQ11 OTHER requires note")
-            seen.add(item["action_id"])
-        return value
-    if qid=="AQ12":
-        value=raw.strip().upper()
-        if value not in OVERALL_OUTCOMES: raise ValueError("AQ12 outcome invalid")
-        return value
-    if qid=="AQ13":
-        value=parse_json_answer(raw,qid)
-        if not isinstance(value,list): raise ValueError("AQ13 must be an array")
-        for item in value:
-            if not isinstance(item,dict) or set(item)!={"condition","alternate_action_type","alternate_action_subtype","note"}: raise ValueError("AQ13 shape invalid")
-            require_text(item["condition"],"AQ13.condition")
-            if item["alternate_action_type"] not in ACTION_SUBTYPES or item["alternate_action_subtype"] not in ACTION_SUBTYPES[item["alternate_action_type"]]: raise ValueError("AQ13 alternate action invalid")
-            require_text(item["note"],"AQ13.note",True)
-        return value
-    if qid=="AQ14":
-        text=require_text(raw,qid); positions=[text.find(h) for h in NARRATIVE_HEADINGS]
-        if any(p<0 for p in positions) or positions!=sorted(positions) or not text.startswith("NARRATIVE_MAPPING"): raise ValueError("AQ14 headings invalid")
-        known=answer_ids(state,"UI")|answer_ids(state,"A")|answer_ids(state,"P")|answer_ids(state,"E")
-        refs=set(re.findall(r"\b(?:UI|A|P|E)[1-9][0-9]*\b",text))
-        if refs-known: raise ValueError("AQ14 introduces unknown identifiers")
-        if answer_ids(state,"UI")-refs or answer_ids(state,"A")-refs: raise ValueError("AQ14 must reference every UI# and A#")
-        if state["answers"].get("AQ5")=="YES" and answer_ids(state,"P")-refs: raise ValueError("AQ14 must reference every P#")
-        if state["answers"].get("AQ5")=="NO" and "NO_PRIOR_PLAN" not in text: raise ValueError("AQ14 must state NO_PRIOR_PLAN")
-        return text
-    raise ValueError(f"unknown action question: {qid}")
-
-def ask_json(obj:dict[str,Any])->str:
-    print(json.dumps(obj,ensure_ascii=False),flush=True)
-    line=sys.stdin.readline()
-    if line=="": raise EOFError("protocol answer input ended")
-    return line.rstrip("\n")
 
 def run_action_questionnaire()->dict[str,Any]:
-    state={"answers":{}}
-    for index,spec in enumerate(ACTION_QUESTIONS):
-        question={**spec,"status":"QUESTION","protocol":"action_questioner","question_number":index+1,"question_count":len(ACTION_QUESTIONS)}
-        while True:
-            raw=ask_json(question)
-            try:
-                state["answers"][spec["id"]]=validate_action_answer(spec["id"],raw,state)
-                break
-            except Exception as exc:
-                question={**question,"error":type(exc).__name__,"detail":str(exc)}
-    pairs=[{"id":spec["id"],"question":spec["question"],"answer":state["answers"][spec["id"]]} for spec in ACTION_QUESTIONS]
-    return {"state":state,"action":{"action_type":"action_questionnaire","scope":"worker","pairs":pairs}}
+    ans={}
+    for q in ACTION_QUESTIONS:
+        qid=q["id"]
+        def validator(v,q=q,qid=qid):
+            if q.get("allowed_answers") and v not in q["allowed_answers"]: raise ValueError(f"{qid} invalid enum")
+        ans[qid]=ask_json(q,validator)
+    validate_action_questionnaire(ans)
+    action={"action_type":"action_questionnaire","scope":"worker","answers":ans}
+    return {"action":action,"state":{"answers":ans}}
 
-def router_norm(qid:str,raw:str)->str:
-    raw=raw.strip()
-    if qid=="Q15.1": return "NONE" if raw.upper() in {"NONE","NO FACT","NO_OBSERVABLE_FACT"} else raw
-    key=raw.upper()
-    aliases={"Y":"YES","N":"NO","ONLY THIS PATH":"ONLY_THIS_PATH","THIS PATH":"ONLY_THIS_PATH","PATH ONLY":"ONLY_THIS_PATH","PREVENTS RESULT":"PREVENTS_RESULT","TASK WIDE":"PREVENTS_RESULT","UNSURE":"UNKNOWN","DON'T KNOW":"UNKNOWN","DONT KNOW":"UNKNOWN"}
-    return aliases.get(key,key)
+# --- router ---------------------------------------------------------------
 
-def router_validate(qid:str,answer:str)->None:
-    allowed=ROUTER_Q[qid][1]
-    if allowed==["FREE_TEXT_OR_NONE"]:
-        if not answer.strip(): raise ValueError("Q15.1 requires a fact or NONE")
-    elif answer not in allowed:
-        raise ValueError(f"allowed answers: {allowed}")
-
-def router_question(qid:str,trace:list[dict[str,Any]])->dict[str,Any]:
+def ask_router(qid:str,pairs:list[dict[str,Any]])->str:
     text,allowed=ROUTER_Q[qid]
-    return {"status":"QUESTION","protocol":"end_turn_router","question_id":qid,"question":text,"allowed_answers":allowed,"trace":[x for x in trace if x.get("kind")=="answer"]}
+    while True:
+        print(json.dumps({"protocol":"end-turn-router","question_id":qid,"question":text,"allowed_answers":allowed},ensure_ascii=False),flush=True)
+        line=sys.stdin.readline()
+        if line=="": raise EOFError(qid)
+        ans=line.strip()
+        if allowed==["FREE_TEXT_OR_NONE"] or ans in allowed:
+            pairs.append({"question_id":qid,"question":text,"answer":ans}); return ans
+        print(json.dumps({"validation_error":f"Allowed: {allowed}"}),flush=True)
 
-def router_transition(qid:str,a:str,stopping_fact:str|None)->tuple[str,str|None,str|None]:
-    key=f"{qid}:{a}"
-    if key in CONTINUE_INSTRUCTIONS: return "DIRECTIVE","CONTINUE",CONTINUE_INSTRUCTIONS[key]
-    routes={
-      ("Q1","YES"):"Q1.1",("Q1","NO"):"Q2",("Q1.1","YES"):"Q1.2",("Q1.1","NO"):"A1",("Q1.2","YES"):"A1",
-      ("Q2","YES"):"Q2.1",("Q2","NO"):"Q3",("Q2.1","YES"):"Q2.2",("Q2.2","ONLY_THIS_PATH"):"A1",("Q2.2","PREVENTS_RESULT"):"A1",
-      ("Q3","YES"):"Q3.1",("Q3","NO"):"Q4",("Q3.1","YES"):"Q3.2",("Q3.2","NO"):"A1",("Q3.2","UNKNOWN"):"A1",
-      ("Q4","YES"):"Q4.1",("Q4","NO"):"Q5",("Q4.1","NO"):"Q4.2",("Q4.2","NO"):"Q4.3",("Q4.3","NO"):"Q4.4",("Q4.4","YES"):"I1",
-      ("Q5","YES"):"Q5.1",("Q5","NO"):"Q6",("Q5.1","YES"):"Q5.2",("Q5.2","YES"):"Q5.3",("Q5.3","NO"):"Q5.4",("Q5.4","NO"):"Q5.5",("Q5.5","NO"):"I1",
-      ("Q6","YES"):"Q6.1",("Q6","NO"):"Q7",("Q6.1","YES"):"Q7",
-      ("Q7","YES"):"Q7.1",("Q7","NO"):"Q8",("Q7.1","YES"):"Q7.2",
-      ("Q8","NO"):"Q9",
-      ("Q9","YES"):"Q9.1",("Q9","NO"):"Q10",("Q9.1","NO"):"Q5",
-      ("Q10","YES"):"Q10.1",("Q10","NO"):"Q11",("Q10.1","YES"):"Q10.2",
-      ("Q11","YES"):"Q11.1",("Q11","NO"):"Q12",("Q11.1","NO"):"A1",
-      ("Q12","YES"):"Q12.1",("Q12","NO"):"Q13",
-      ("Q13","YES"):"Q13.1",("Q13","NO"):"Q14",
-      ("Q14","YES"):"Q14.1",("Q14","NO"):"Q15",("Q14.1","YES"):"Q14.2",("Q14.2","NO"):"A1",
-      ("Q15","YES"):"Q15.1",("Q15","NO"):"C1",("Q15.2","YES"):"Q15.3",("Q15.3","YES"):"A1",("Q15.3","UNKNOWN"):"A1",("Q15.3","NO"):"I1",
-      ("I1","YES"):"I2",("I2","YES"):"I3",("I3","NO"):"A1",("I3","YES"):"I4",("I4","NO"):"I5",
-      ("C1","NO"):"C2",("C2","NO"):"C3",("C3","NO"):"C4",
-    }
-    if qid=="Q15.1" and a!="NONE": return "QUESTION","Q15.2",None
-    if (qid,a) in routes: return "QUESTION",routes[(qid,a)],None
-    if qid in ALT_NEXT and a=="NO": return "QUESTION",ALT_NEXT[qid],None
-    if qid=="A9" and a=="NO": return "QUESTION","I1",None
-    if qid=="I5" and a=="NO": return "DIRECTIVE","IMPASSE","A required dependency remains unsatisfied; applicable alternatives are exhausted; no independent requested work or available gap-reducing action remains."
-    if qid=="C4" and a=="YES": return "DIRECTIVE","COMPLETE","The questionnaire found no remaining continuation trigger and the Completion Evidence Test is satisfied."
-    raise RuntimeError(f"Unhandled router transition {qid}/{a}")
+def run_alt(pairs):
+    q="A1"
+    while q in ALT_NEXT:
+        if ask_router(q,pairs)=="YES": return ("CONTINUE",f"Use the alternative path established by {q} and continue execution.")
+        q=ALT_NEXT[q]
+    return None
+
+def run_impasse(pairs):
+    if ask_router("I1",pairs)!="YES": return ("CONTINUE","The claimed unresolved requirement is not grounded; continue without treating it as a blocker.")
+    if ask_router("I2",pairs)!="YES": return ("CONTINUE","The claimed inability is not evidenced; continue execution and test an available path.")
+    if ask_router("I3",pairs)!="YES": return ("CONTINUE","Alternative path search is incomplete; continue by testing remaining applicable alternatives.")
+    if ask_router("I4",pairs)=="YES": return ("CONTINUE","Independent requested work remains; continue with it now.")
+    if ask_router("I5",pairs)=="YES": return ("CONTINUE","A currently available gap-reducing action remains; perform it now.")
+    return ("IMPASSE",None)
+
+def run_completion(pairs):
+    if ask_router("C1",pairs)=="YES": return ("CONTINUE","An explicit requested deliverable is missing; produce it before ending the turn.")
+    if ask_router("C2",pairs)=="YES": return ("CONTINUE","A completion claim lacks observable support; obtain or report the required supporting result.")
+    if ask_router("C3",pairs)=="YES": return ("CONTINUE","A requested portion remains partial; continue execution on the remaining gap.")
+    if ask_router("C4",pairs)=="YES": return ("COMPLETE",None)
+    return ("CONTINUE","The proposed response does not itself provide the requested result; continue until the result is actually deliverable.")
 
 def run_router()->dict[str,Any]:
-    qid="Q1"; trace=[]; stopping_fact=None
-    while True:
-        question=router_question(qid,trace)
-        while True:
-            raw=ask_json(question)
-            a=router_norm(qid,raw)
-            try:
-                router_validate(qid,a); break
-            except Exception as exc:
-                question={**question,"error":type(exc).__name__,"detail":str(exc)}
-        trace.append({"kind":"answer","question_id":qid,"answer":a})
-        if qid=="Q15.1" and a!="NONE": stopping_fact=a
-        kind,target,instruction=router_transition(qid,a,stopping_fact)
-        if kind=="QUESTION":
-            qid=target
-            continue
-        pairs=[{"id":x["question_id"],"question":ROUTER_Q[x["question_id"]][0],"answer":x["answer"]} for x in trace]
+    pairs=[]; stopping_fact=None
+    q1=ask_router("Q1",pairs)
+    if q1=="YES":
+        if ask_router("Q1.1",pairs)=="YES":
+            cause=ask_router("Q1.2",pairs)
+            if cause=="NO": return {"cycle_id":uuid.uuid4().hex,"scope":"worker","pairs":pairs,"directive":"CONTINUE","instruction":"Inspect the failure cause from observable evidence before deciding whether execution can stop."}
+            alt=run_alt(pairs)
+            if alt: target,instruction=alt
+            else: target,instruction=run_impasse(pairs)
+            return {"cycle_id":uuid.uuid4().hex,"scope":"worker","pairs":pairs,"directive":target,**({"instruction":instruction} if instruction else {})}
+        if ask_router("Q1.2",pairs)=="NO":
+            target,instruction=("CONTINUE","Inspect the failed path and identify its actual cause before stopping.")
+        else:
+            alt=run_alt(pairs)
+            target,instruction=alt if alt else ("CONTINUE","The failed path does not establish whole-task impossibility; continue using another available approach.")
+        return {"cycle_id":uuid.uuid4().hex,"scope":"worker","pairs":pairs,"directive":target,"instruction":instruction}
+    for qid in ["Q2","Q3","Q4","Q5","Q6","Q7","Q8","Q9","Q10","Q11","Q12","Q13","Q14","Q15"]:
+        a=ask_router(qid,pairs)
+        if a=="NO": continue
+        if qid=="Q2":
+            if ask_router("Q2.1",pairs)=="NO": return {"cycle_id":uuid.uuid4().hex,"scope":"worker","pairs":pairs,"directive":"CONTINUE","instruction":"Test the claimed limitation directly before stopping."}
+            if ask_router("Q2.2",pairs)=="ONLY_THIS_PATH":
+                alt=run_alt(pairs); target,instruction=alt if alt else ("CONTINUE","Only one path is blocked; continue via another available path.")
+            else: target,instruction=run_impasse(pairs)
+        elif qid=="Q3":
+            if ask_router("Q3.1",pairs)=="NO": target,instruction=("CONTINUE","The stopping requirement is not grounded in the request or governing instructions; continue without it.")
+            elif ask_router("Q3.2",pairs) in {"YES","UNKNOWN"}: target,instruction=("CONTINUE","Continue by satisfying or testing another legitimate way to satisfy the requirement.")
+            else: target,instruction=run_impasse(pairs)
+        elif qid=="Q4":
+            q41=ask_router("Q4.1",pairs)
+            if q41=="YES": target,instruction=("CONTINUE","Existing user authorization is sufficient; perform the already-authorized action.")
+            elif ask_router("Q4.2",pairs)=="YES": target,instruction=("CONTINUE","Earlier authorization remains valid; continue without re-requesting it.")
+            elif ask_router("Q4.3",pairs)=="YES" and ask_router("Q4.4",pairs)=="NO": target,instruction=("CONTINUE","Implementation changed but the authorized objective did not; continue under existing authorization.")
+            else: target,instruction=("CONTINUE","Continue as far as current authorization permits; ask only if a genuinely new authorization boundary remains.")
+        elif qid=="Q5":
+            if ask_router("Q5.1",pairs)=="NO": target,instruction=("CONTINUE","No concrete unknown has been identified; continue execution.")
+            elif ask_router("Q5.2",pairs)=="NO": target,instruction=("CONTINUE","The unknown does not materially affect the next useful action; continue.")
+            elif ask_router("Q5.3",pairs)=="YES": target,instruction=("CONTINUE","Resolve the value from already supplied context and continue.")
+            elif ask_router("Q5.4",pairs)=="YES": target,instruction=("CONTINUE","Retrieve or determine the missing value using an available source or tool.")
+            elif ask_router("Q5.5",pairs)=="YES": target,instruction=("CONTINUE","Use a bounded non-destructive assumption and continue while making the assumption explicit where relevant.")
+            else: target,instruction=run_impasse(pairs)
+        elif qid=="Q6":
+            if ask_router("Q6.1",pairs)=="NO": target,instruction=("CONTINUE","Perform the available action instead of merely describing it.")
+            else: continue
+        elif qid=="Q7":
+            if ask_router("Q7.1",pairs)=="YES" and ask_router("Q7.2",pairs)=="NO": target,instruction=("CONTINUE","Obtain the substantive observable result before responding.")
+            else: continue
+        elif qid=="Q8": target,instruction=("CONTINUE","Perform the independent requested work that remains available.")
+        elif qid=="Q9":
+            if ask_router("Q9.1",pairs)=="YES": target,instruction=("CONTINUE","Use the latest applicable request/state and continue.")
+            else: target,instruction=("CONTINUE","Reconcile the task with the latest applicable request before stopping.")
+        elif qid=="Q10":
+            if ask_router("Q10.1",pairs)=="NO": target,instruction=("CONTINUE","Discard the assistant-introduced blocker and continue toward the user's actual request.")
+            elif ask_router("Q10.2",pairs)=="YES": target,instruction=("CONTINUE","Narrow the legitimate constraint to the scope actually required and continue.")
+            else: continue
+        elif qid=="Q11":
+            if ask_router("Q11.1",pairs)=="YES": target,instruction=("CONTINUE","Use the directly suited available tool or source for the unmet requirement.")
+            else: continue
+        elif qid=="Q12":
+            if ask_router("Q12.1",pairs)=="NO": target,instruction=("CONTINUE","Do not defer unfinished work to an uninvolved future mechanism; execute it now.")
+            else: continue
+        elif qid=="Q13":
+            if ask_router("Q13.1",pairs)=="NO": target,instruction=("CONTINUE","Stop performing the unrequested execution and answer the actual non-execution request.")
+            else: continue
+        elif qid=="Q14":
+            if ask_router("Q14.1",pairs)=="NO": target,instruction=("CONTINUE","Do not let the support process block substantive execution; continue the task.")
+            elif ask_router("Q14.2",pairs)=="YES": target,instruction=("CONTINUE","Satisfy the required support process now and immediately continue substantive execution.")
+            else: target,instruction=run_impasse(pairs)
+        else: # Q15
+            stopping_fact=ask_router("Q15.1",pairs)
+            if stopping_fact=="NONE": target,instruction=("CONTINUE","No observable stopping fact exists; continue execution.")
+            elif ask_router("Q15.2",pairs)=="NO": target,instruction=("CONTINUE","Verify the claimed stopping fact where testing is available.")
+            elif ask_router("Q15.3",pairs) in {"YES","UNKNOWN"}: target,instruction=("CONTINUE","Change or test the execution path while preserving the requested result.")
+            else: target,instruction=run_impasse(pairs)
         cycle={"cycle_id":uuid.uuid4().hex,"scope":"worker","pairs":pairs,"directive":target}
         if instruction: cycle["instruction"]=instruction
         if target=="IMPASSE": cycle["impasse_evidence"]=stopping_fact or "No additional impasse evidence was captured beyond the recorded router answers."
         return cycle
+    target,instruction=run_completion(pairs)
+    cycle={"cycle_id":uuid.uuid4().hex,"scope":"worker","pairs":pairs,"directive":target}
+    if instruction: cycle["instruction"]=instruction
+    return cycle
+
+# --- prompt preprocessor --------------------------------------------------
+
+PREPROCESSOR_GOVERNING_KINDS = {
+    "CONSTRAINT":"Limits how one or more actions may be performed.",
+    "PROHIBITION":"States something that must not occur or must not be included.",
+    "PERMISSION":"States an action or method that the user explicitly permits.",
+    "SOURCE_RESTRICTION":"Limits information acquisition to specified sources or source classes.",
+    "TEMPORAL_RESTRICTION":"Limits execution or source selection by time or recency.",
+    "LOCATION_RESTRICTION":"Limits execution or selection by place, environment, or storage location.",
+    "FORMAT_REQUIREMENT":"Requires a particular representation or output format.",
+    "QUALITY_REQUIREMENT":"Requires a stated quality, validation, or evidence threshold.",
+    "ORDERING_REQUIREMENT":"Requires an explicit sequence among otherwise identified actions.",
+}
+PREPROCESSOR_MODIFIER_KINDS = {
+    "QUANTITY":"Specifies how many or how much.",
+    "SCOPE":"Limits or expands the set to which a requirement applies.",
+    "CRITERION":"Provides a property used to compare, select, validate, classify, or score.",
+    "ORDER":"Specifies required relative ordering.",
+    "PRIORITY":"Specifies preference among actions or results.",
+    "RECENCY":"Specifies temporal freshness such as latest or recent.",
+    "COMPLETENESS":"Specifies all, every, complete, exhaustive, or analogous coverage.",
+    "EXCLUSIVITY":"Specifies only, exactly, exclusively, or analogous exclusion of alternatives.",
+}
+PREPROCESSOR_DELIVERABLE_KINDS = {
+    "ANSWER":"A user-facing answer or determination.",
+    "ARTIFACT":"A newly produced file or other persistent object.",
+    "MODIFICATION":"A requested change to existing state or an existing artifact.",
+    "CALCULATION":"A computed user-facing value or result.",
+    "COMPARISON":"A user-facing comparison of identified subjects.",
+    "RECOMMENDATION":"A user-facing selection or recommendation.",
+    "RETRIEVED_OBJECT":"A retrieved object or usable reference requested for delivery.",
+    "REPORT":"A structured or narrative report of findings.",
+    "CONFIRMATION":"A user-facing confirmation that an operation or state was established.",
+}
+
+def _enum_descriptions(mapping:dict[str,str])->str:
+    return " | ".join(f"{key} — {description}" for key,description in mapping.items())
+
+def _require_exact_keys(value:Any,expected:set[str],name:str)->dict[str,Any]:
+    if not isinstance(value,dict) or set(value)!=expected: raise ValueError(f"{name} must contain exactly {sorted(expected)}")
+    return value
+
+def _string_array(value:Any,name:str,allow_empty:bool=True)->list[str]:
+    if not isinstance(value,list) or (not allow_empty and not value): raise ValueError(f"{name} must be an array{' with at least one item' if not allow_empty else ''}")
+    for item in value: require_text(item,name)
+    return value
+
+def _supporting_text(value:Any,name:str,original_prompt:str,allow_empty:bool=False)->list[str]:
+    items=_string_array(value,name,allow_empty=allow_empty)
+    for item in items:
+        if item not in original_prompt: raise ValueError(f"{name} contains text not copied exactly from original_user_prompt")
+    return items
+
+def _numbered_objects(value:Any,prefix:str,name:str,keys:set[str],allow_empty:bool=True)->list[dict[str,Any]]:
+    if not isinstance(value,list) or (not allow_empty and not value): raise ValueError(f"{name} must be an array{' with at least one item' if not allow_empty else ''}")
+    for index,item in enumerate(value,1):
+        _require_exact_keys(item,keys,f"{name}[{index}]")
+        if item["id"]!=f"{prefix}{index}": raise ValueError(f"{name} IDs must be {prefix}1, {prefix}2, ... in order")
+    return value
+
+def _semantic_question(question_id:str,semantic_function:str,instruction:str,inputs:dict[str,Any],response_schema:dict[str,Any],constraints:list[str],validator)->Any:
+    prompt={"protocol":PREPROCESSOR_PROTOCOL,"question_id":question_id,"semantic_function":semantic_function,"instruction":instruction,"inputs":inputs,"response_schema":response_schema,"constraints":constraints}
+    while True:
+        print(json.dumps(prompt,ensure_ascii=False),flush=True)
+        line=sys.stdin.readline()
+        if line=="": raise EOFError(f"EOF waiting for {question_id}")
+        try: value=json.loads(line)
+        except json.JSONDecodeError as exc:
+            prompt={**prompt,"validation_error":f"Response must be one JSON value: {exc}"}; continue
+        try:
+            validator(value)
+            return value
+        except Exception as exc:
+            prompt={**prompt,"validation_error":str(exc)}
+
+def _validate_graph(actions:list[dict[str,Any]],dependencies:list[dict[str,Any]])->list[str]:
+    ids=[item["id"] for item in actions]; valid=set(ids)
+    incoming={item:0 for item in ids}; outgoing={item:[] for item in ids}
+    for dep in dependencies:
+        if dep["from_action"] not in valid or dep["to_action"] not in valid: raise ValueError("dependency references unknown action")
+        if dep["from_action"]==dep["to_action"]: raise ValueError("action cannot depend on itself")
+        outgoing[dep["from_action"]].append(dep["to_action"]); incoming[dep["to_action"]]+=1
+    queue=[item for item in ids if incoming[item]==0]; out=[]
+    while queue:
+        current=queue.pop(0); out.append(current)
+        for nxt in outgoing[current]:
+            incoming[nxt]-=1
+            if incoming[nxt]==0: queue.append(nxt)
+    if len(out)!=len(actions): raise ValueError("preprocessor dependency graph contains a cycle")
+    return out
+
+def _pp1(original_prompt:str):
+    def validate(v):
+        _require_exact_keys(v,{"goal","supporting_text"},"PP1")
+        require_text(v["goal"],"PP1.goal"); _supporting_text(v["supporting_text"],"PP1.supporting_text",original_prompt)
+    return _semantic_question("PP1","IDENTIFY_GOAL","Read original_user_prompt. State the terminal result or state the user wants to exist when the request is fully satisfied. Do not describe implementation steps. Do not add requirements, assumptions, criteria, or constraints. supporting_text must contain one or more exact substrings copied from original_user_prompt that support the goal.",{"original_user_prompt":original_prompt},{"goal":"string","supporting_text":["exact substring from original_user_prompt"]},["Perform only semantic analysis; do not execute the user task.","Do not improve or broaden the request."],validate)
+
+def _pp2(original_prompt:str,goal:dict[str,Any]):
+    def validate(v):
+        _require_exact_keys(v,{"requirements"},"PP2")
+        for item in _numbered_objects(v["requirements"],"R","PP2.requirements",{"id","text","supporting_text"},allow_empty=False):
+            require_text(item["text"],"PP2 requirement text"); _supporting_text(item["supporting_text"],"PP2 supporting_text",original_prompt)
+    return _semantic_question("PP2","DECOMPOSE_REQUIREMENTS","Decompose original_user_prompt into every independently testable user requirement. Preserve semantic strength, quantities, restrictions, requested outputs, and qualifications. Do not combine requirements that could independently be satisfied or fail. supporting_text for each requirement must contain exact substrings copied from original_user_prompt.",{"original_user_prompt":original_prompt,"goal":goal},{"requirements":[{"id":"R#","text":"string","supporting_text":["exact substring"]}]},["Do not invent requirements.","Do not perform any requested action."],validate)
+
+def _pp3(requirements:list[dict[str,Any]]):
+    req_ids={x["id"] for x in requirements}
+    def validate(v):
+        _require_exact_keys(v,{"actions"},"PP3")
+        for item in _numbered_objects(v["actions"],"A","PP3.actions",{"id","type","subtype","semantic_description","requirement_ids"},allow_empty=False):
+            if item["type"] not in ACTION_SUBTYPES or item["subtype"] not in ACTION_SUBTYPES[item["type"]]: raise ValueError("PP3 action ontology invalid")
+            require_text(item["semantic_description"],"PP3 semantic_description")
+            refs=_string_array(item["requirement_ids"],"PP3 requirement_ids",allow_empty=False)
+            if any(x not in req_ids for x in refs): raise ValueError("PP3 references unknown requirement")
+    return _semantic_question("PP3","DECOMPOSE_ACTIONS",f"Identify the smallest meaningful material operations required to satisfy the listed requirements. Do not perform any operation. Classify every operation using exactly one supplied action type and subtype. Use these self-describing choices: {ACTION_ONTOLOGY_TEXT}",{"requirements":requirements,"action_ontology":ACTION_ONTOLOGY_DESCRIPTIONS},{"actions":[{"id":"A#","type":"ACTION_TYPE","subtype":"ACTION_SUBTYPE","semantic_description":"string","requirement_ids":["R#"]}]},["Every action must support at least one requirement.","Do not add actions that merely improve the task beyond the user's request."],validate)
+
+def _pp4(original_prompt:str,requirements:list[dict[str,Any]],actions:list[dict[str,Any]]):
+    action_ids={x["id"] for x in actions}
+    def validate(v):
+        _require_exact_keys(v,{"action_arguments"},"PP4")
+        items=v["action_arguments"]
+        if not isinstance(items,list) or len(items)!=len(actions): raise ValueError("PP4 must contain exactly one argument object per action")
+        seen=set()
+        for item in items:
+            _require_exact_keys(item,{"action_id","target","inputs","outputs","referents"},"PP4 action argument")
+            if item["action_id"] not in action_ids or item["action_id"] in seen: raise ValueError("PP4 action_id invalid or duplicate")
+            seen.add(item["action_id"]); require_text(item["target"],"PP4 target")
+            _string_array(item["inputs"],"PP4 inputs"); _string_array(item["outputs"],"PP4 outputs"); _string_array(item["referents"],"PP4 referents")
+    return _semantic_question("PP4","IDENTIFY_ACTION_ARGUMENTS","For each action, identify what it acts on, what semantic inputs it requires, what result it produces, and the relevant referents. Do not invent inputs not supported by the request or necessary outputs of another identified action.",{"original_user_prompt":original_prompt,"requirements":requirements,"actions":actions},{"action_arguments":[{"action_id":"A#","target":"string","inputs":["string"],"outputs":["string"],"referents":["string"]}]},["Return exactly one object per action.","Do not perform the actions."],validate)
+
+def _pp5(original_prompt:str,actions:list[dict[str,Any]]):
+    action_ids={x["id"] for x in actions}; kinds=set(PREPROCESSOR_GOVERNING_KINDS)
+    def validate(v):
+        _require_exact_keys(v,{"governing_fragments"},"PP5")
+        for item in _numbered_objects(v["governing_fragments"],"G","PP5.governing_fragments",{"id","kind","text","applies_to","supporting_text"},allow_empty=True):
+            if item["kind"] not in kinds: raise ValueError("PP5 governing kind invalid")
+            require_text(item["text"],"PP5 text"); refs=_string_array(item["applies_to"],"PP5 applies_to",allow_empty=False)
+            if any(x not in action_ids for x in refs): raise ValueError("PP5 unknown action")
+            _supporting_text(item["supporting_text"],"PP5 supporting_text",original_prompt)
+    return _semantic_question("PP5","IDENTIFY_GOVERNING_FRAGMENTS",f"Identify semantic elements in the user request that govern how one or more actions may be performed but are not themselves actions. Use only these kinds: {_enum_descriptions(PREPROCESSOR_GOVERNING_KINDS)} Preserve original semantic strength and scope.",{"original_user_prompt":original_prompt,"actions":actions},{"governing_fragments":[{"id":"G#","kind":"KIND","text":"string","applies_to":["A#"],"supporting_text":["exact substring"]}]},["Return [] when no governing fragment is present.","Do not invent prudent or useful constraints."],validate)
+
+def _pp6(original_prompt:str,requirements:list[dict[str,Any]],actions:list[dict[str,Any]]):
+    valid={x["id"] for x in requirements}|{x["id"] for x in actions}; kinds=set(PREPROCESSOR_MODIFIER_KINDS)
+    def validate(v):
+        _require_exact_keys(v,{"modifiers"},"PP6")
+        for item in _numbered_objects(v["modifiers"],"M","PP6.modifiers",{"id","kind","value","applies_to","supporting_text"},allow_empty=True):
+            if item["kind"] not in kinds: raise ValueError("PP6 modifier kind invalid")
+            require_text(str(item["value"]),"PP6 value"); refs=_string_array(item["applies_to"],"PP6 applies_to",allow_empty=False)
+            if any(x not in valid for x in refs): raise ValueError("PP6 unknown reference")
+            _supporting_text(item["supporting_text"],"PP6 supporting_text",original_prompt)
+    return _semantic_question("PP6","IDENTIFY_MODIFIERS",f"Identify every quantity, scope operator, selection/comparison criterion, recency requirement, exclusivity operator, completeness requirement, priority, or other represented modifier. Use only these kinds: {_enum_descriptions(PREPROCESSOR_MODIFIER_KINDS)}",{"original_user_prompt":original_prompt,"requirements":requirements,"actions":actions},{"modifiers":[{"id":"M#","kind":"KIND","value":"string","applies_to":["R# or A#"],"supporting_text":["exact substring"]}]},["Pay particular attention to words such as only, all, every, latest, recent, exactly, at least, at most, before, and after.","Do not create implied preferences."],validate)
+
+def _pp7(actions:list[dict[str,Any]],arguments:list[dict[str,Any]],governing:list[dict[str,Any]]):
+    action_ids={x["id"] for x in actions}
+    def validate(v):
+        _require_exact_keys(v,{"dependencies"},"PP7")
+        if not isinstance(v["dependencies"],list): raise ValueError("PP7 dependencies must be array")
+        for dep in v["dependencies"]:
+            _require_exact_keys(dep,{"from_action","to_action","relationship"},"PP7 dependency")
+            if dep["from_action"] not in action_ids or dep["to_action"] not in action_ids: raise ValueError("PP7 unknown action")
+            if dep["relationship"] not in {"REQUIRES_OUTPUT","REQUIRES_COMPLETION"}: raise ValueError("PP7 relationship invalid")
+        _validate_graph(actions,v["dependencies"])
+    return _semantic_question("PP7","IDENTIFY_DEPENDENCIES","Determine which actions semantically require outputs or completion of other actions before they can be performed. Do not impose an order merely because actions were mentioned in that order. Use REQUIRES_OUTPUT — the earlier action produces an input required by the later action; REQUIRES_COMPLETION — the earlier action must complete first even when no direct output is consumed.",{"actions":actions,"action_arguments":arguments,"governing_fragments":governing},{"dependencies":[{"from_action":"A#","to_action":"A#","relationship":"REQUIRES_OUTPUT | REQUIRES_COMPLETION"}]},["Return [] when actions are semantically independent.","The graph must be acyclic."],validate)
+
+def _pp8(original_prompt:str,actions:list[dict[str,Any]]):
+    action_ids={x["id"] for x in actions}
+    def arr(value,name,prefix,keys):
+        for item in _numbered_objects(value,prefix,name,keys,allow_empty=True):
+            refs=_string_array(item["applies_to"],f"{name} applies_to",allow_empty=False)
+            if any(x not in action_ids for x in refs): raise ValueError(f"{name} unknown action")
+            _supporting_text(item["supporting_text"],f"{name} supporting_text",original_prompt)
+            require_text(item["text"],f"{name} text")
+    def validate(v):
+        _require_exact_keys(v,{"conditions","alternatives","fallbacks"},"PP8")
+        arr(v["conditions"],"PP8.conditions","C",{"id","text","applies_to","supporting_text"})
+        arr(v["alternatives"],"PP8.alternatives","L",{"id","text","applies_to","supporting_text"})
+        arr(v["fallbacks"],"PP8.fallbacks","F",{"id","text","applies_to","supporting_text"})
+    return _semantic_question("PP8","IDENTIFY_BRANCHING","Identify explicit or necessarily represented conditional execution, alternatives, fallbacks, exceptions, and mutually exclusive paths. Do not create fallback behavior merely because one might be useful.",{"original_user_prompt":original_prompt,"actions":actions},{"conditions":[{"id":"C#","text":"string","applies_to":["A#"],"supporting_text":["exact substring"]}],"alternatives":[{"id":"L#","text":"string","applies_to":["A#"],"supporting_text":["exact substring"]}],"fallbacks":[{"id":"F#","text":"string","applies_to":["A#"],"supporting_text":["exact substring"]}]},["Return empty arrays for absent categories.","Do not execute a branch."],validate)
+
+def _pp9(original_prompt:str,goal:dict[str,Any],requirements:list[dict[str,Any]]):
+    req_ids={x["id"] for x in requirements}; kinds=set(PREPROCESSOR_DELIVERABLE_KINDS)
+    def validate(v):
+        _require_exact_keys(v,{"deliverables"},"PP9")
+        for item in _numbered_objects(v["deliverables"],"D","PP9.deliverables",{"id","kind","description","requirement_ids","supporting_text"},allow_empty=False):
+            if item["kind"] not in kinds: raise ValueError("PP9 kind invalid")
+            require_text(item["description"],"PP9 description"); refs=_string_array(item["requirement_ids"],"PP9 requirement_ids",allow_empty=False)
+            if any(x not in req_ids for x in refs): raise ValueError("PP9 unknown requirement")
+            _supporting_text(item["supporting_text"],"PP9 supporting_text",original_prompt)
+    return _semantic_question("PP9","IDENTIFY_DELIVERABLES",f"Identify everything the user expects to receive, observe, or have changed when the task is complete. Distinguish intermediate action outputs from user-facing deliverables. Use only these kinds: {_enum_descriptions(PREPROCESSOR_DELIVERABLE_KINDS)}",{"original_user_prompt":original_prompt,"goal":goal,"requirements":requirements},{"deliverables":[{"id":"D#","kind":"KIND","description":"string","requirement_ids":["R#"],"supporting_text":["exact substring"]}]},["Every deliverable must map to at least one requirement.","Do not add presentation requirements the user did not request."],validate)
+
+def _pp10(original_prompt:str,current_ir:dict[str,Any]):
+    def validate(v):
+        _require_exact_keys(v,{"ambiguities"},"PP10")
+        items=_numbered_objects(v["ambiguities"],"U","PP10.ambiguities",{"id","subject","interpretations","material","supporting_text"},allow_empty=True)
+        for item in items:
+            require_text(item["subject"],"PP10 subject"); interpretations=_string_array(item["interpretations"],"PP10 interpretations",allow_empty=False)
+            if len(interpretations)<2: raise ValueError("PP10 ambiguity needs at least two interpretations")
+            if not isinstance(item["material"],bool): raise ValueError("PP10 material must be boolean")
+            _supporting_text(item["supporting_text"],"PP10 supporting_text",original_prompt)
+    return _semantic_question("PP10","DETECT_AMBIGUITY","Identify terms, referents, scopes, criteria, quantities, relationships, or requested outcomes that have more than one materially different plausible interpretation. Do not resolve an ambiguity. Report the plausible interpretations and whether the difference would materially change execution or correctness.",{"original_user_prompt":original_prompt,"current_semantic_representation":current_ir},{"ambiguities":[{"id":"U#","subject":"string","interpretations":["string","string"],"material":"boolean","supporting_text":["exact substring"]}]},["Do not invent ambiguity merely because more detail could be supplied.","Do not resolve an identified ambiguity."],validate)
+
+def _render_fragment(qid:str,semantic_function:str,instruction:str,inputs:dict[str,Any])->str:
+    def validate(v): _require_exact_keys(v,{"fragment"},qid); require_text(v["fragment"],f"{qid}.fragment")
+    return _semantic_question(qid,semantic_function,instruction,inputs,{"fragment":"string"},["Generate only the requested fragment.","Do not add semantic content not represented in inputs."],validate)["fragment"]
+
+def _render_fragments(ir:dict[str,Any])->dict[str,Any]:
+    fragments={"goal":"","actions":{},"governing":{},"conditions":{},"alternatives":{},"fallbacks":{},"deliverables":{}}
+    fragments["goal"]=_render_fragment("PP11-GOAL","RENDER_GOAL_FRAGMENT","Express the supplied goal as one concise task-goal clause. Preserve its semantic strength and referents exactly. Do not add implementation steps.",{"goal":ir["goal"]})
+    args_by={x["action_id"]:x for x in ir["action_arguments"]}
+    for action in ir["actions"]:
+        aid=action["id"]; modifiers=[x for x in ir["modifiers"] if aid in x["applies_to"]]
+        fragments["actions"][aid]=_render_fragment(f"PP11-{aid}","RENDER_ACTION_FRAGMENT","Express the supplied action as one executable imperative clause. Preserve exactly the action semantics, target, inputs, outputs, referents, and modifiers. Do not merge it with another action and do not add planning or rationale.",{"action":action,"arguments":args_by[aid],"modifiers":modifiers})
+    for item in ir["governing_fragments"]:
+        fragments["governing"][item["id"]]=_render_fragment(f"PP11-{item['id']}","RENDER_GOVERNING_FRAGMENT","Express this governing semantic element as one concise instruction clause. Preserve its strength and scope exactly.",{"governing_fragment":item})
+    for item in ir["conditions"]:
+        fragments["conditions"][item["id"]]=_render_fragment(f"PP11-{item['id']}","RENDER_CONDITION_FRAGMENT","Express this condition as one concise conditional instruction clause without adding consequences not represented by applies_to.",{"condition":item})
+    for item in ir["alternatives"]:
+        fragments["alternatives"][item["id"]]=_render_fragment(f"PP11-{item['id']}","RENDER_ALTERNATIVE_FRAGMENT","Express this alternative-path relationship as one concise instruction clause. Preserve whether the represented paths are mutually exclusive or optional.",{"alternative":item})
+    for item in ir["fallbacks"]:
+        fragments["fallbacks"][item["id"]]=_render_fragment(f"PP11-{item['id']}","RENDER_FALLBACK_FRAGMENT","Express this explicit fallback relationship as one concise instruction clause without inventing triggering conditions.",{"fallback":item})
+    for item in ir["deliverables"]:
+        fragments["deliverables"][item["id"]]=_render_fragment(f"PP11-{item['id']}","RENDER_DELIVERABLE_FRAGMENT","Express this required user-facing deliverable as one concise imperative clause without adding content requirements.",{"deliverable":item})
+    return fragments
+
+def _recompose(ir:dict[str,Any],fragments:dict[str,Any])->tuple[str,str]:
+    order=_validate_graph(ir["actions"],ir["dependencies"])
+    sections=["TASK\n"+fragments["goal"]]
+    if order:
+        sections.append("PERFORM\n"+"\n".join(f"{i}. {fragments['actions'][aid]}" for i,aid in enumerate(order,1)))
+    if fragments["governing"]:
+        sections.append("CONSTRAINTS\n"+"\n".join(f"- {fragments['governing'][item['id']]}" for item in ir["governing_fragments"]))
+    branch_lines=[]
+    for group,key in [("conditions","conditions"),("alternatives","alternatives"),("fallbacks","fallbacks")]:
+        branch_lines.extend(f"- {fragments[group][item['id']]}" for item in ir[key])
+    if branch_lines: sections.append("CONDITIONS AND ALTERNATIVES\n"+"\n".join(branch_lines))
+    sections.append("DELIVER\n"+"\n".join(f"- {fragments['deliverables'][item['id']]}" for item in ir["deliverables"]))
+    task_prompt="\n\n".join(sections)
+    first_command=fragments["actions"][order[0]] if order else "Perform exactly one material next action toward task_prompt."
+    return task_prompt,first_command
+
+def _pp12(original_prompt:str,ir:dict[str,Any],candidate_task_prompt:str):
+    keys={"omitted","added","strength_changed","referent_changed","other_semantic_changes"}
+    def validate(v):
+        _require_exact_keys(v,keys,"PP12")
+        for key in keys: _string_array(v[key],f"PP12.{key}")
+    return _semantic_question("PP12","AUDIT_RECOMPOSITION","Compare original_user_prompt, prompt_ir, and candidate_task_prompt. Do not improve or rewrite either prompt. Report only semantic information that was omitted, added, strengthened, weakened, assigned to the wrong referent, or otherwise changed. Use empty arrays when no issue of a category exists.",{"original_user_prompt":original_prompt,"prompt_ir":ir,"candidate_task_prompt":candidate_task_prompt},{"omitted":["string"],"added":["string"],"strength_changed":["string"],"referent_changed":["string"],"other_semantic_changes":["string"]},["This is an equivalence audit, not an optimization task.","Do not propose improvements."],validate)
+
+def run_prompt_preprocessor(original_prompt:str)->dict[str,Any]:
+    goal=_pp1(original_prompt)
+    requirements=_pp2(original_prompt,goal)["requirements"]
+    actions=_pp3(requirements)["actions"]
+    arguments=_pp4(original_prompt,requirements,actions)["action_arguments"]
+    governing=_pp5(original_prompt,actions)["governing_fragments"]
+    modifiers=_pp6(original_prompt,requirements,actions)["modifiers"]
+    dependencies=_pp7(actions,arguments,governing)["dependencies"]
+    branching=_pp8(original_prompt,actions)
+    deliverables=_pp9(original_prompt,goal,requirements)["deliverables"]
+    partial_ir={"schema":"prompt-ir-v1","goal":goal,"requirements":requirements,"actions":actions,"action_arguments":arguments,"governing_fragments":governing,"modifiers":modifiers,"dependencies":dependencies,"conditions":branching["conditions"],"alternatives":branching["alternatives"],"fallbacks":branching["fallbacks"],"deliverables":deliverables}
+    ambiguities=_pp10(original_prompt,partial_ir)["ambiguities"]
+    ir={**partial_ir,"ambiguities":ambiguities}
+    if any(item["material"] for item in ambiguities):
+        return {"status":"FALLBACK","reason":"MATERIAL_AMBIGUITY","task_prompt":original_prompt,"prompt_ir":ir}
+    fragments=_render_fragments(ir)
+    candidate,first_command=_recompose(ir,fragments)
+    audit=_pp12(original_prompt,ir,candidate)
+    if any(audit[key] for key in audit):
+        return {"status":"FALLBACK","reason":"SEMANTIC_AUDIT_FAILED","task_prompt":original_prompt,"prompt_ir":ir,"fragments":fragments,"audit":audit}
+    return {"status":"ACCEPTED","reason":None,"task_prompt":candidate,"first_command":first_command,"prompt_ir":ir,"fragments":fragments,"audit":audit}
+
+# --- payload/state --------------------------------------------------------
+
+def seal_payload(payload:dict[str,Any])->dict[str,Any]:
+    base={k:v for k,v in payload.items() if k!="payload_sha256"}; payload["payload_sha256"]=sha256_json(base); return payload
+
+def verify_payload(payload:dict[str,Any])->dict[str,Any]:
+    if not isinstance(payload,dict) or payload.get("schema")!=PAYLOAD_SCHEMA: raise ValueError("invalid payload schema")
+    expected=payload.get("payload_sha256"); base={k:v for k,v in payload.items() if k!="payload_sha256"}
+    if not isinstance(expected,str) or sha256_json(base)!=expected: raise ValueError("payload integrity failure")
+    if payload.get("authority") not in {"TASK_ACTION","FINAL_RESPONSE"}: raise ValueError("invalid authority")
+    if not isinstance(payload.get("state"),dict): raise ValueError("state missing")
+    if payload["authority"]=="TASK_ACTION":
+        require_text(payload.get("task_prompt"),"task_prompt"); require_text(payload.get("command"),"command")
+    return payload
 
 def new_state(user_prompt:str)->dict[str,Any]:
     if not isinstance(user_prompt,str) or not user_prompt:
@@ -595,6 +791,8 @@ def new_state(user_prompt:str)->dict[str,Any]:
         "original_user_prompt":user_prompt,
         "task_prompt":user_prompt,
         "prompt_intake_mode":"VERBATIM",
+        "preprocessor_requested":False,
+        "preprocessor_status":"NOT_REQUESTED",
     }
 
 def issue_task_payload(state:dict[str,Any],command:str,context:dict[str,Any]|None=None)->dict[str,Any]:
@@ -633,23 +831,49 @@ def emit(payload:dict[str,Any])->int:
     print(json.dumps(payload,ensure_ascii=False),flush=True)
     return 0
 
-def parse_initialization(value:Any)->str:
-    if not isinstance(value,dict) or set(value)!={"schema","type","user_prompt"}:
-        raise ValueError("initialization object must contain exactly schema, type, and user_prompt")
+def parse_initialization(value:Any)->tuple[str,bool]:
+    if not isinstance(value,dict): raise ValueError("initialization must be an object")
+    required={"schema","type","user_prompt"}; allowed=required|{"preprocessor"}
+    if not required.issubset(value) or not set(value).issubset(allowed):
+        raise ValueError("initialization object must contain schema, type, and user_prompt, with only optional preprocessor")
     if value.get("schema")!=INITIALIZATION_SCHEMA:
         raise ValueError("initialization schema is invalid")
     if value.get("type")!="INITIALIZE":
         raise ValueError("initialization type must be INITIALIZE")
-    return require_text(value.get("user_prompt"),"initialization.user_prompt")
+    requested="preprocessor" in value
+    if requested and value.get("preprocessor") is not True:
+        raise ValueError("when present, initialization.preprocessor must be JSON true")
+    return require_text(value.get("user_prompt"),"initialization.user_prompt"),requested
 
 def process_initialization(value:Any)->dict[str,Any]:
-    user_prompt=parse_initialization(value)
+    user_prompt,preprocessor_requested=parse_initialization(value)
     state=new_state(user_prompt)
-    return issue_task_payload(
-        state,
-        "Execute exactly one material next action toward task_prompt. Return this complete payload unchanged when that action completes, fails, or reaches an attempted end-of-turn stop point.",
-        {"initialization":"accepted","prompt_intake_mode":state["prompt_intake_mode"]},
-    )
+    state["preprocessor_requested"]=preprocessor_requested
+    command="Execute exactly one material next action toward task_prompt. Return this complete payload unchanged when that action completes, fails, or reaches an attempted end-of-turn stop point."
+    context={"initialization":"accepted","preprocessor_requested":preprocessor_requested}
+    if preprocessor_requested:
+        try:
+            result=run_prompt_preprocessor(user_prompt)
+            state["task_prompt"]=result["task_prompt"]
+            state["preprocessor_status"]=result["status"]
+            state["preprocessor_reason"]=result.get("reason")
+            state["prompt_intake_mode"]="SEMANTIC_RECOMPOSITION" if result["status"]=="ACCEPTED" else "VERBATIM_FALLBACK"
+            state["prompt_ir"]=result.get("prompt_ir")
+            if result["status"]=="ACCEPTED":
+                state["preprocessor_fragments"]=result.get("fragments")
+                state["preprocessor_audit"]=result.get("audit")
+                command=result["first_command"]
+            context.update({"preprocessor_status":state["preprocessor_status"],"preprocessor_reason":state.get("preprocessor_reason")})
+        except Exception as exc:
+            state["task_prompt"]=user_prompt
+            state["prompt_intake_mode"]="VERBATIM_FALLBACK"
+            state["preprocessor_status"]="FALLBACK"
+            state["preprocessor_reason"]="PROTOCOL_ERROR"
+            state["preprocessor_error"]={"type":type(exc).__name__,"detail":str(exc)}
+            context.update({"preprocessor_status":"FALLBACK","preprocessor_reason":"PROTOCOL_ERROR"})
+    else:
+        context["preprocessor_status"]="NOT_REQUESTED"
+    return issue_task_payload(state,command,context)
 
 def main()->int:
     first=sys.stdin.readline()
