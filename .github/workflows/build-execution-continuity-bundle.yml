@@ -33,9 +33,6 @@ jobs:
           echo "commit_sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
           echo "skill_tree_sha=${SKILL_TREE_SHA}" >> "$GITHUB_OUTPUT"
 
-          echo "Commit SHA: ${COMMIT_SHA}"
-          echo "Skill tree SHA: ${SKILL_TREE_SHA}"
-
       - name: Build bundle manifest
         shell: bash
         env:
@@ -83,15 +80,12 @@ jobs:
               compresslevel=9,
           ) as zf:
               for path in files:
-                  arcname = path.as_posix()
-
                   info = zipfile.ZipInfo(
-                      arcname,
+                      path.as_posix(),
                       date_time=(1980, 1, 1, 0, 0, 0),
                   )
                   info.compress_type = zipfile.ZIP_DEFLATED
                   info.external_attr = 0o100644 << 16
-
                   zf.writestr(info, path.read_bytes())
 
           print(output)
@@ -99,4 +93,63 @@ jobs:
 
           ARCHIVE="execution-continuity-control_bundle_${COMMIT_SHA}.zip"
 
-          sha256sum "$ARCHIVE" >
+          sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
+
+          ls -lh "$ARCHIVE" "${ARCHIVE}.sha256"
+          cat "${ARCHIVE}.sha256"
+
+      - name: Upload canonical bundle artifact
+        id: upload_bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: execution-continuity-control-${{ steps.ids.outputs.skill_tree_sha }}
+          path: |
+            execution-continuity-control_bundle_${{ steps.ids.outputs.commit_sha }}.zip
+            execution-continuity-control_bundle_${{ steps.ids.outputs.commit_sha }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+
+      - name: Write current bundle pointer
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.upload_bundle.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.upload_bundle.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.upload_bundle.outputs.artifact-digest }}
+          COMMIT_SHA: ${{ steps.ids.outputs.commit_sha }}
+          SKILL_TREE_SHA: ${{ steps.ids.outputs.skill_tree_sha }}
+        run: |
+          set -euo pipefail
+
+          cat > execution-continuity-bundle.json <<EOF
+          {
+            "repository": "${GITHUB_REPOSITORY}",
+            "branch": "${GITHUB_REF_NAME}",
+            "workflow_run_id": "${GITHUB_RUN_ID}",
+            "artifact_id": "${ARTIFACT_ID}",
+            "artifact_url": "${ARTIFACT_URL}",
+            "artifact_digest": "${ARTIFACT_DIGEST}",
+            "commit_sha": "${COMMIT_SHA}",
+            "skill_tree_sha": "${SKILL_TREE_SHA}"
+          }
+          EOF
+
+          cat execution-continuity-bundle.json
+
+      - name: Publish bundle pointer
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add execution-continuity-bundle.json
+
+          if git diff --cached --quiet; then
+            echo "Bundle pointer unchanged."
+            exit 0
+          fi
+
+          git commit -m "Update execution continuity bundle pointer [skip ci]"
+          git push
