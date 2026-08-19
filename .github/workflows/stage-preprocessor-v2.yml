@@ -44,3 +44,5 @@ jobs:
           git add execution-continuity-control/bundle.py
           git commit -m "Stage source-anchored semantic preprocessor v2"
           git push origin HEAD:preprocessor-v2-staging
+
+# retrigger staging assembly
