@@ -24,13 +24,13 @@ The earliest behavior-control design required actual task execution, validation,
 
 A history-first gate, per-turn history files, templates, and archive rotation were removed because bookkeeping itself could delay the task. Recording became prospective: a material action completes, then recording machinery runs before the next material action begins.
 
-The logical record also changed from per-turn/per-chat files to one append-only project record shared across chats.
+The logical record changed from per-turn/per-chat files to one append-only project record shared across chats.
 
 **Retained invariants:** no retrospective fabrication; cross-chat project continuity; corrections append rather than rewrite history.
 
 ### Executable end-turn router
 
-Premature stopping after one failed path, reporting intentions instead of acting, and stopping with executable work remaining led to `end_turn_router.py`. The executable owns questionnaire traversal and directive classification.
+Premature stopping after one failed path, reporting intentions instead of acting, and stopping with executable work remaining led to `scripts/end_turn_router.py`. The executable owns questionnaire traversal and directive classification.
 
 **Retained invariants:** exhaust viable continuation before impasse; router behavior must alter execution, not merely document it.
 
@@ -42,7 +42,7 @@ Canonical scripts and runtime executables were separated. Runtime copies never a
 
 A self-invoked router was bypassable because the same Worker owned both the decision to invoke the gate and the actual turn boundary. Control moved to a higher-scope Orchestrator.
 
-The Worker performs the substantive task but cannot actually end the user-facing turn. Worker stop attempts are simulated signals. The Orchestrator invokes continuity machinery, routes Worker-scoped answers, and is itself router-gated. Only outer Orchestrator `COMPLETE` permits actual termination.
+The Worker performs the substantive task but cannot actually end the user-facing turn. Worker stop attempts are simulated lifecycle signals. The Orchestrator invokes continuity machinery, routes Worker-scoped answers, and is itself router-gated. Only outer Orchestrator `COMPLETE` permits actual termination.
 
 **Retained invariant:** the actor that owns actual termination is outside the Worker and is itself continuity-governed.
 
@@ -50,73 +50,69 @@ The Worker performs the substantive task but cannot actually end the user-facing
 
 Canonical source moved to GitHub. Source identity is stable path + repository + commit SHA. `main` is resolved once per governed turn and all required canonical files are read from that exact commit so mixed revisions cannot occur.
 
-Timestamped canonical source filenames and storage-surface collision rules are superseded environment-specific mechanisms. Their underlying invariants remain: mechanically resolvable authority, immutable revision identity, coherent multi-file snapshots, and no stale-copy authority.
+Timestamped canonical source filenames and storage-surface collision rules became superseded environment-specific mechanisms. Their underlying invariants remain: mechanically resolvable authority, immutable revision identity, coherent multi-file snapshots, and no stale-copy authority.
 
 ### Single runtime bundle bootstrap
 
 A later execution failure exposed an ambiguity in the phrase "copy canonical source into the execution environment": retrieving source through the GitHub connector did not itself create executable files under `/mnt/data`. The model could read canonical scripts yet never materialize or execute them.
 
-The bootstrap contract was therefore made explicit. Retrieval of canonical `SKILL.md` instructs the caller to pin one `main` commit, retrieve every canonical dependency from that exact SHA, and create exactly one timestamped local bundle representing that coherent snapshot.
+Retrieval of `SKILL.md` therefore became a bootstrap event requiring one coherent pinned snapshot to be materialized locally as a bundle while preserving canonical root-relative paths.
 
-The bundle preserves canonical root-relative paths rather than flattening filenames. Its embedded tree contains `SKILL.md`, `DESIGN_HISTORY.md`, both schema files under `schemas/`, and runtime/continuity scripts under `scripts/`.
+### Executable bundle owns child materialization and dispatch
 
-**Retained invariants:** one coherent Git snapshot per turn; no mixed-revision runtime; runtime derivatives have no canonical authority; observable local materialization precedes script execution; canonical relative paths remain mechanically identifiable.
+The first runtime-bundle design used a passive JSON document and still required the model to extract embedded script text into executable child files. That left a second avoidable failure boundary.
 
-### Executable bundle owns subscript materialization and dispatch
+The bundle was changed into one executable Python file built from canonical `scripts/runtime_bundle.py` plus an embedded manifest. It verifies the embedded file set and Git blob SHAs, owns its private derivative tree, and became the sole model-facing continuity runtime entrypoint. The model no longer extracts or directly executes child scripts.
 
-The first runtime-bundle design used a JSON document as the local snapshot and still required the model to extract embedded script text into executable child files. That left a second avoidable failure boundary: a model could successfully create the bundle yet fail to reconstruct, write, address, or invoke its subscripts.
+The bundle internally invokes recorder, questioner, and router and relays their protocol outputs while preserving child filesystem effects.
 
-The bundle was therefore changed from a passive JSON container into one executable Python file. Canonical `scripts/runtime_bundle.py` is a deterministic template containing one payload sentinel. Bootstrap constructs a v2 manifest from the exact pinned canonical files, base64-encodes that manifest, substitutes it into the template exactly once, writes one timestamped `/mnt/data/execution-continuity-control_bundle_[timestamp].py`, and invokes `bootstrap`.
+### Bundle-controlled orchestration loop
 
-The executable bundle verifies the embedded file set and Git blob SHAs, owns the private derivative tree, and becomes the sole model-facing continuity runtime entrypoint for the turn. The model no longer extracts or directly executes child scripts.
+A remaining bypass existed above child dispatch: after bundle bootstrap the model still had to remember to assume the Orchestrator role, expose the user prompt to a Worker, invoke continuity after every action, and manually decide when to give the Worker another action. A model could successfully initialize the runtime yet free-run the Worker or skip the Orchestrator identity boundary.
 
-The bundle exposes controlled dispatch commands for recorder, questioner, and router. It materializes exact embedded child source internally, preserves `scripts/` and `schemas/` paths, rejects caller replacement of recorder child paths, executes the selected canonical child with Python, relays child stdout/stderr and exit status, and leaves child-produced files/state in the execution environment.
+The bundle therefore became the orchestration controller rather than only a subscript dispatcher.
 
-This keeps the existing recorder → questioner → router → questioner → recorder protocol intact while moving filesystem plumbing out of model discretion. `schemas/runtime-bundle.schema.json` now describes the embedded v2 manifest rather than the outer executable Python file.
+On initial `bootstrap`, the bundle now verifies/materializes the pinned snapshot, creates a bundle-local control state, and immediately returns `REQUEST_USER_PROMPT`. The complete current user prompt is supplied unchanged and persisted as the session task payload.
 
-The bundle is still noncanonical. GitHub repository + stable path + commit SHA remain authoritative; the executable bundle and its private derivatives are runtime representations only.
+The bundle then returns `ORCHESTRATOR_IDENTITY_CHECK` containing the canonical Orchestrator definition. The model must explicitly confirm `YES`. A `NO` response produces an instruction to adopt that role; no Worker command is issued until the gate is satisfied.
 
-**Retained invariants:** one pinned snapshot per turn; no mixed-version children; model-visible protocol output remains the child script's output; child scripts keep their existing responsibilities; recorder remains the sole execution-record writer; runtime implementation details cannot acquire canonical authority.
+After confirmation, the bundle returns `ORCHESTRATE_WORKER` with the captured prompt and an explicit rule list. The command permits exactly one next Worker material action. Immediately after that action, the Orchestrator must invoke `after-action --scope worker`. The bundle internally runs recorder/questioner/router and owns the state needed to continue their protocol.
+
+When a non-end-turn Worker action finishes its questionnaire, or a Worker router cycle returns `CONTINUE`, the bundle itself emits the next `ORCHESTRATE_WORKER` control result. This removes the model's discretion to let the Worker perform multiple material actions without passing through continuity control.
+
+Worker `COMPLETE` or `IMPASSE` returns `WORKER_TERMINAL_TO_ORCHESTRATOR`, never direct user-facing termination. If work remains, `resume-worker` creates a new Worker command. If the Orchestrator proposes actual termination, that Orchestrator action goes through the same post-action continuity path at Orchestrator scope. Only persisted outer `COMPLETE` returns `TURN_END_AUTHORIZED`.
+
+The phrase "the script invokes the Orchestrator" is implemented as a mandatory script-to-model control protocol: the Python bundle emits a role-targeted control result that the caller must execute. The script does not claim to instantiate a separate model process by itself.
+
+**Retained invariants:** Orchestrator remains task-domain neutral; captured user intent is preserved; every material action is followed by continuity before another Worker action; Worker terminal states do not own turn termination; outer COMPLETE remains the sole user-facing end authorization; recorder/questioner/router responsibilities are unchanged.
 
 ### Explicit execution-record schema
 
-Nominal format labels were replaced by one real canonical JSON Schema at `schemas/execution-record.schema.json`.
+Nominal format labels were replaced by one canonical JSON Schema at `schemas/execution-record.schema.json`.
 
-The project record is an immutable sequence of complete snapshots. Each successor preserves every earlier action unchanged, links to the predecessor filename and SHA-256, and appends exactly one new action object. Historical information belongs in the accumulated record rather than being repeated in every new action.
+The project record is an immutable sequence of complete snapshots. Each successor preserves earlier actions unchanged, links to the predecessor filename and SHA-256, and appends exactly one new action object.
 
 ### Recorder and action-questioner separation
 
-The original recorder combined persistence with an action interview. This obscured responsibilities and made the recorder itself responsible for understanding the action.
+The original recorder combined persistence with an action interview. The recorder was made deliberately ignorant of why it was invoked. On external `invoke`, it appends only a timestamped `recorder_invocation` action and starts `scripts/action_questioner.py`. Child callbacks use a separate append path that never starts another questionnaire.
 
-The recorder was made deliberately ignorant of why it was invoked. On external `invoke`, it appends only a timestamped `recorder_invocation` action and starts `action_questioner.py`. Child-script callbacks use a separate append path that never starts another questionnaire, preventing recursive audit machinery.
-
-The action questioner owns the post-action interrogation. End-turn detection is an explicit binary question rather than a semantic inference from free-form text.
+The action questioner owns post-action interrogation. End-turn detection is an explicit binary question rather than semantic inference from free-form text.
 
 ### Router return-path ownership and dual output
 
-An intermediate design allowed `end_turn_router.py` to call the recorder directly. That violated the caller hierarchy: the end-turn router had been invoked by the action questioner, so its completed result should return to that caller rather than reaching sideways into persistence.
-
-The corrected flow is:
+An intermediate design allowed `scripts/end_turn_router.py` to call the recorder directly. That violated caller hierarchy. The corrected flow is:
 
 `recorder invoke → questioner → router → questioner → recorder`
 
-The action questioner remains the router's caller for the entire router cycle. When the router reaches a directive, it produces both a model-facing control result (`CONTINUE`, `COMPLETE`, or `IMPASSE`) and a formatted `router_cycle` audit object. The questioner wraps the audit object as `end_turn_result` for the recorder and relays the control result toward the model. Neither product substitutes for the other.
+The questioner remains the router's caller for the full cycle. A terminal router produces both the model-facing directive and the complete `router_cycle` audit object. The questioner wraps the audit object as `end_turn_result` and returns it to the recorder before the directive is acted upon.
 
-The execution record therefore has one chronological `actions` stream with three top-level variants: `recorder_invocation`, `action_questionnaire`, and `end_turn_result`. The `end_turn_result` contains the router-produced `router_cycle` object nested unchanged. There is no separate router history and no blank router placeholder.
+### Decision-engineering questionnaire
 
-### Decision-engineering questionnaire replaces generic eight-question interview
+The generic eight-question free-form interview was replaced with a structured post-action decision record covering end-turn classification, user intent, `UI#` items, ordered `A#` actions, optional `P#` plans, action-to-intent mappings, `E#` evidence, per-intent outcomes, plan/path divergence, decision bases, overall outcome, supported counterfactuals, and a constrained `NARRATIVE_MAPPING` note.
 
-The original eight generic free-form questions preserved broad descriptions such as what happened, why, status, and evidence, but they were poorly normalized for future decision modeling. They also encouraged narrative answers where a finite decision vocabulary was available.
+Atomic action vocabulary remains finite (`ACQUIRE`, `TRANSFORM`, `EVALUATE`, `DECIDE`, `ACT`, `OBSERVE`, `COMMUNICATE`) with canonical subtypes. This decomposition is post-action representation, not a requirement to interrupt execution after microscopic operations.
 
-The questionnaire was replaced with a structured post-action decision record. It captures explicit end-turn classification; concise user intent; independently testable `UI#` intent items; ordered atomic `A#` actions; optional prior `P#` plan items; action-to-intent mappings; `E#` evidence; per-intent outcomes; plan/path divergence; decision bases; overall outcome; supported counterfactuals; and a constrained `NARRATIVE_MAPPING` note.
-
-The atomic action vocabulary is intentionally finite even for meta-level work. Seven parent types (`ACQUIRE`, `TRANSFORM`, `EVALUATE`, `DECIDE`, `ACT`, `OBSERVE`, `COMMUNICATE`) have canonical subtypes. This is representational decomposition after an activity, not a mandate to interrupt execution after every tiny operation.
-
-Every enumerated question co-presents a canonical definition table. The final narrative note references existing structured identifiers and cannot introduce new actions, requirements, plans, or outcomes. It is a constrained post-action self-report, not raw chain-of-thought and not independent evidence.
-
-The questioner is intentionally non-evaluative. It validates answer shape, canonical enum membership, identifier ordering, and internal references; it does not decide whether the model's answers are true. At completion it emits `QUESTIONER_ACTION_OVER` with the formatted questionnaire object.
-
-**Retained invariants:** exact Q/A evidence remains first-class; end-turn detection remains mechanical; recorder remains sole persistent snapshot writer; questioner does not infer hidden reasons; structured decision data is cross-checkable against observable execution evidence; representational decomposition must not become an execution gate.
+The questioner validates form and references, not truth or hidden reasoning.
 
 ## Protected invariants
 
@@ -126,48 +122,59 @@ The questioner is intentionally non-evaluative. It validates answer shape, canon
 4. Do not reconstruct unrecorded history as contemporaneous evidence.
 5. Record completed material actions prospectively before the next material action.
 6. Maintain one append-only project record across chats; corrections are new actions.
-7. Every immutable successor preserves all predecessor actions unchanged and appends exactly one new action.
+7. Every immutable successor preserves predecessor actions unchanged and appends exactly one new action.
 8. The recorder is the sole execution-record snapshot writer.
 9. Recorder invocation does not classify or infer the action; it timestamps invocation and starts the questioner.
 10. The action questioner preserves exact ordered canonical Q/A pairs, including native structured JSON answers where required.
 11. `AQ1` is the sole action-questionnaire end-turn discriminator and is normalized to explicit `YES` or `NO`.
 12. Every enumerated action-questionnaire question co-presents its canonical definition table.
-13. Atomic action decomposition is post-action representation only; it must not force artificial execution segmentation or become a prerequisite that delays substantive work.
-14. Structured identifiers (`UI#`, `A#`, `P#`, `E#`) are ordered and cross-referenced rather than replaced by prose-only descriptions.
-15. The final `NARRATIVE_MAPPING` note may explain existing structured data but may not introduce new actions, requirements, plans, outcomes, or identifiers.
-16. The questioner validates form and reference consistency, not truth, hidden reasoning, or correctness of the model's self-report.
-17. `QUESTIONER_ACTION_OVER` means only that the questionnaire action is complete; it grants no Worker, router, or turn-completion authority.
-18. An end-turn-classified questionnaire invokes the end-turn router only after the questionnaire object has been recorded.
-19. The action questioner remains the caller/proxy for the entire router cycle.
-20. The end-turn router never invokes the recorder and has no execution-record write authority.
+13. Atomic action decomposition is post-action representation only; it must not become an execution-delaying microscopic gate.
+14. Structured identifiers (`UI#`, `A#`, `P#`, `E#`) are ordered and cross-referenced.
+15. `NARRATIVE_MAPPING` may explain existing structured data but may not introduce new actions, requirements, plans, outcomes, or identifiers.
+16. The questioner validates form/reference consistency, not truth, hidden reasoning, or correctness of the model's self-report.
+17. `QUESTIONER_ACTION_OVER` means only that questionnaire execution completed.
+18. An end-turn-classified questionnaire invokes the router only after the questionnaire object is recorded.
+19. The questioner remains caller/proxy for the router cycle.
+20. The router never invokes the recorder and has no execution-record write authority.
 21. The executed router owns traversal and `CONTINUE`/`COMPLETE`/`IMPASSE` classification.
-22. A completed router cycle produces both a model-facing control result and a formatted audit data object.
-23. The questioner wraps the returned router object as `end_turn_result` and returns that wrapper to the recorder before the directive is acted upon.
-24. Child-script data-object appends do not recursively launch the action questioner.
-25. Worker terminal states end only the Worker lifecycle; only outer Orchestrator `COMPLETE` ends the user-facing turn.
-26. The Orchestrator remains task-domain neutral and is itself continuity-governed.
-27. Resolve one Git commit snapshot per governed turn and read all required canonical files from it.
-28. Canonical files use one stable path each; Git provides version history.
+22. A completed router cycle produces both control output and a formatted audit object.
+23. The questioner wraps router data as `end_turn_result` and returns it to recorder before directive execution.
+24. Child-data append does not recursively launch the questioner.
+25. Worker terminal states end only Worker lifecycle; only outer Orchestrator `COMPLETE` ends the user-facing turn.
+26. The Orchestrator remains task-domain neutral and continuity-governed.
+27. Resolve one Git commit snapshot per governed turn and read all canonical files from it.
+28. Canonical files use stable paths; Git provides version history.
 29. Runtime derivatives have no canonical authority.
 30. Persistent record semantics are storage-provider neutral.
-31. Persistent record structure is controlled by the canonical JSON Schema plus recorder cross-snapshot invariants.
+31. Persistent record structure is controlled by canonical schema plus recorder cross-snapshot invariants.
 32. Historical information is not redundantly restated in every new action object.
-33. Retrieval of canonical `SKILL.md` triggers complete runtime-bundle construction before continuity runtime execution.
-34. Exactly one timestamped executable runtime bundle represents the pinned canonical Git snapshot locally for a governed turn.
-35. The embedded manifest preserves canonical root-relative paths, including `schemas/` and `scripts/` subfolder notation.
-36. All continuity child execution for the turn is derived from the same verified executable bundle; later GitHub reads cannot become independent runtime sources.
-37. Bundle construction, invocation, and `BUNDLE_READY` verification are observable prerequisites for claiming the continuity runtime was initialized.
-38. The model never extracts or directly manages embedded continuity child scripts after the executable bundle exists.
-39. `scripts/runtime_bundle.py` is the canonical executable-bundle template and contains exactly one payload substitution sentinel.
-40. The executable bundle owns its private derivative tree and verifies existing derivatives byte-for-byte before use.
-41. Recorder child paths are bundle-controlled; the caller cannot substitute a different questioner or router during bundle-dispatched recorder invocation.
-42. Bundle dispatch relays child stdout/stderr and exit status without replacing the child protocol, while child filesystem/state effects remain available in the execution environment.
+33. Retrieval of canonical `SKILL.md` triggers complete executable-bundle construction before governed execution.
+34. Exactly one timestamped executable runtime bundle represents the pinned Git snapshot locally for a governed turn.
+35. The embedded manifest preserves canonical root-relative paths, including `schemas/` and `scripts/`.
+36. All child execution for the turn derives from the same verified bundle; later GitHub reads cannot become independent runtime sources.
+37. Bundle construction and successful bootstrap are observable prerequisites for initialized continuity runtime.
+38. The model never extracts or directly manages embedded continuity child scripts after bundle creation.
+39. `scripts/runtime_bundle.py` is the canonical executable-bundle template and contains exactly one payload sentinel.
+40. The bundle owns and verifies its private derivative tree.
+41. Recorder child paths are bundle-controlled.
+42. Bundle child execution preserves child protocol output and filesystem/state effects.
+43. Initial bundle invocation requests the complete current user prompt and stores it unchanged before Worker execution.
+44. Orchestrator identity requires an explicit `YES` against the canonical bundle-provided definition before any Worker command.
+45. The canonical Orchestrator definition is supplied by `scripts/runtime_bundle.py`, not reconstructed ad hoc by the caller.
+46. Each `ORCHESTRATE_WORKER` permits exactly one next material Worker action.
+47. After each completed Worker material action, the bundle must be invoked before another Worker material action starts.
+48. Post-action recorder/questioner/router completion precedes issuance of the next Worker command.
+49. The next Worker instruction after a nonterminal action or `CONTINUE` is emitted by the bundle as `ORCHESTRATE_WORKER`.
+50. Worker `COMPLETE`/`IMPASSE` never directly authorize user-facing termination.
+51. Actual user-facing termination requires an Orchestrator-scoped continuity cycle that returns persisted outer `COMPLETE` and bundle status `TURN_END_AUTHORIZED`.
+52. Bundle-local orchestration control state is tied to the exact timestamped bundle and pinned source SHA.
+53. Direct model-facing recorder/questioner/router dispatch is superseded by the orchestration protocol; child invocation is internal to the bundle.
 
 ## Superseded mechanisms
 
 Do not restore these merely because older artifacts contain them:
 
-- mandatory action-category decomposition as an execution gate;
+- mandatory action-category decomposition as a pre-execution gate;
 - universal history-first gating;
 - one history file per turn;
 - history-template initialization and fixed-count archive rotation;
@@ -175,24 +182,28 @@ Do not restore these merely because older artifacts contain them:
 - greatest-filename-timestamp canonical-source selection;
 - collision-suffix canonical defenses;
 - storage-specific canonical persistence handoffs;
-- allowing the Worker to own actual `END_TURN`;
+- allowing Worker to own actual `END_TURN`;
 - treating Worker `COMPLETE`/`IMPASSE` or outer `IMPASSE` as actual-turn completion;
 - multiple nominal schema labels without a normative contract;
 - verbose generic per-action semantic categories that repeat record history;
-- the generic eight-question free-form action interview;
-- a recorder that interviews the model or attempts to infer action type;
-- free-form action-type parsing for end-turn detection;
-- parallel router-cycle history outside the chronological action stream;
-- blank or prospective router-cycle placeholders;
+- the generic eight-question free-form interview;
+- a recorder that interviews the model or infers action type;
+- free-form action parsing for end-turn detection;
+- parallel router history outside the chronological action stream;
+- blank/prospective router placeholders;
 - direct router-to-recorder persistence calls;
-- treating a post-action narrative self-report as raw chain-of-thought or independent evidence;
-- treating connector retrieval of source text as equivalent to local runtime materialization;
-- independently fetching or copying individual runtime scripts after a verified turn bundle exists;
-- flattening canonical `scripts/` or `schemas/` paths into ambiguous local source identities;
-- a passive JSON-only runtime bundle that still requires the model to extract executable children;
+- treating narrative self-report as raw chain-of-thought or independent evidence;
+- treating connector retrieval as equivalent to local runtime materialization;
+- independently fetching/copying runtime scripts after bundle creation;
+- flattening canonical `scripts/` or `schemas/` paths;
+- passive JSON-only bundle requiring model extraction of executable children;
 - direct model invocation of bundle-derived child script paths;
-- caller-supplied recorder questioner/router paths when the recorder is invoked through the executable bundle.
+- caller-supplied recorder questioner/router paths;
+- bootstrap that only reports readiness and leaves prompt capture/role initialization to model memory;
+- preprompt-only Orchestrator activation without an executable identity gate;
+- allowing a Worker to perform multiple material actions before bundle re-entry;
+- direct model-facing child-dispatch commands as the normal governed execution interface.
 
 ## Revision rule
 
-Before changing canon, resolve current `main`, read `SKILL.md`, this history, and affected canonical resources from the same commit; identify affected protected invariants; preserve or explicitly supersede them; update this history; commit complete replacement content at stable paths; and verify the resulting coherent `main` snapshot.
+Before changing canon, resolve current `main`, read `SKILL.md`, this history, and affected canonical resources from the same commit; identify affected protected invariants; preserve or explicitly supersede them; update this history; stage complete replacement content at stable paths; verify coherence; then move `main`.
