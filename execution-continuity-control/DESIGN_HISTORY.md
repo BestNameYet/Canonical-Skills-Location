@@ -20,11 +20,9 @@ The earliest behavior-control design required actual task execution, validation,
 
 **Retained invariants:** accomplish the requested result; support completion claims with observable evidence.
 
-### Recording moved from pre-work to post-event
+### Recording moved from pre-work to post-action
 
-A history-first gate, per-turn history files, templates, and archive rotation were tried and later removed because bookkeeping itself could delay the task. Recording became prospective:
-
-`material unit completes → record it → next material unit begins`
+A history-first gate, per-turn history files, templates, and archive rotation were tried and later removed because bookkeeping itself could delay the task. Recording became prospective: a material action completes, then the recording machinery runs before the next material action begins.
 
 The logical record also changed from per-turn/per-chat files to one append-only project record shared across chats.
 
@@ -58,25 +56,33 @@ Current source identity is stable path + repository + commit SHA. `main` is reso
 
 The old timestamped-canon, collision-suffix, and storage-surface authoring rules are superseded environment-specific mechanisms. Their underlying invariants remain: mechanically resolvable authority, immutable revision identity, coherent multi-file snapshots, and no stale-copy authority.
 
-### Explicit minimal execution-record format
+### Explicit execution-record schema
 
-The legacy recorder emitted nominal `schema` labels without a separate normative format contract and stored many semantic categories per entry. That was ambiguous and unnecessarily repetitive.
+Nominal format labels were replaced by one real canonical JSON Schema at `schemas/execution-record.schema.json`.
 
-The replacement introduces one real canonical JSON Schema:
+The project record is an immutable sequence of complete snapshots. Each successor preserves every earlier action unchanged, links to the predecessor filename and SHA-256, and appends one new action object.
 
-`execution-record.schema.json`
+Historical information belongs in the accumulated record rather than being repeated in every new action.
 
-New persistent snapshots use `format_version: 1`. Runtime recorder sessions, receipts, router state, and router audit payloads do not declare independent schema identities.
+### Recorder, questioner, and router separation
 
-Each event entry has only three semantic fields:
+The original recorder combined persistence with an action interview. This obscured responsibilities and made the recorder itself responsible for understanding what kind of action had occurred.
 
-- `event`
-- `outcome`
-- `evidence`
+The mechanism was split into three scripts with strict dataflow:
 
-All other stored fields are mechanical metadata. Entries are incremental deltas: historical context already present in the record is not repeated unless necessary to identify a dependency. Compatible historical snapshots remain immutable and may be normalized in memory when producing their first version-1 successor.
+`material action → recorder invocation → action questioner → optional end-turn router`
 
-**Retained invariants:** audit evidence remains sufficient to establish what happened; format control is explicit; migration preserves append-only historical lineage.
+The recorder is now deliberately ignorant of why it was invoked. On external `invoke`, it appends only a timestamped `recorder_invocation` action and starts the questioner. Child-script callbacks enter through a separate append-only path that never starts another questionnaire.
+
+The action questioner owns the eight-question interview. Its second question is an explicit binary discriminator: `Is this action an end-of-turn attempt? Answer YES or NO.` `Y/N` are accepted aliases but storage is normalized to `YES/NO`. This replaced free-form action-type interpretation so end-turn routing is mechanical rather than semantic guesswork.
+
+After all eight answers, the questioner sends one formatted `action_questionnaire` object to the recorder. If AQ2 is `YES`, it then invokes the end-turn router from the newly appended snapshot.
+
+The end-turn router remains the only owner of continuation traversal and directive classification. When a cycle reaches a directive, it sends one formatted `router_cycle` object containing the exact executed question/answer pairs and directive to the recorder before the directive is acted upon.
+
+The execution record is therefore one chronological action stream with three variants: `recorder_invocation`, `action_questionnaire`, and `router_cycle`. There is no separate router-history array and no blank router placeholder.
+
+**Retained invariants:** every material action triggers prospective recording; the recorder remains the sole snapshot writer; exact questionnaire and router Q/A evidence is preserved; end-turn detection is deterministic; router traversal remains executable and authoritative; audit callbacks cannot recursively create new interviews.
 
 ## Protected invariants
 
@@ -84,18 +90,25 @@ All other stored fields are mechanical metadata. Entries are incremental deltas:
 2. Execution outranks plans or intentions when execution is requested and available.
 3. Completion, mutation, persistence, and validation claims require observable support.
 4. Do not reconstruct unrecorded history as contemporaneous evidence.
-5. Record completed material units prospectively, before the next material unit.
-6. Maintain one append-only project record across chats; corrections are new entries.
-7. The executed router owns traversal and `CONTINUE`/`COMPLETE`/`IMPASSE` classification.
-8. Recorder/audit state does not override router control.
-9. Worker terminal states end only the Worker lifecycle; only outer Orchestrator `COMPLETE` ends the user-facing turn.
-10. The Orchestrator remains task-domain neutral and is itself continuity-governed.
-11. Resolve one Git commit snapshot per governed turn and read all required canonical files from it.
-12. Canonical files use one stable path each; Git provides version history.
-13. Runtime Runnables are fresh derivatives with no canonical authority.
-14. Persistent record semantics are storage-provider neutral.
-15. Persistent record structure is controlled by the canonical JSON Schema and recorder invariants.
-16. Record entries contain only new event delta information unless prior context must be referenced.
+5. Record completed material actions prospectively before the next material action.
+6. Maintain one append-only project record across chats; corrections are new actions.
+7. Every immutable successor preserves all predecessor actions unchanged and appends exactly one new action.
+8. The recorder is the sole execution-record snapshot writer.
+9. Recorder invocation does not classify or infer the action; it timestamps invocation and starts the questioner.
+10. The action questioner owns exactly eight canonical questions and stores exact ordered Q/A pairs.
+11. AQ2 is the sole end-turn discriminator and is normalized to explicit `YES` or `NO`.
+12. AQ2 `YES` mechanically invokes the end-turn router only after the questionnaire object has been recorded.
+13. The executed router owns traversal and `CONTINUE`/`COMPLETE`/`IMPASSE` classification.
+14. Every completed router cycle sends its exact executed Q/A object to the recorder before its directive is acted upon.
+15. Child-script data-object appends do not recursively launch the action questioner.
+16. Worker terminal states end only the Worker lifecycle; only outer Orchestrator `COMPLETE` ends the user-facing turn.
+17. The Orchestrator remains task-domain neutral and is itself continuity-governed.
+18. Resolve one Git commit snapshot per governed turn and read all required canonical files from it.
+19. Canonical files use one stable path each; Git provides version history.
+20. Runtime Runnables are fresh derivatives with no canonical authority.
+21. Persistent record semantics are storage-provider neutral.
+22. Persistent record structure is controlled by the canonical JSON Schema plus recorder cross-snapshot invariants.
+23. Historical information is not redundantly restated in every new action object.
 
 ## Superseded mechanisms
 
@@ -112,7 +125,11 @@ Do not restore these merely because older artifacts contain them:
 - allowing the Worker to own actual `END_TURN`;
 - treating Worker `COMPLETE`/`IMPASSE` or outer `IMPASSE` as actual-turn completion;
 - multiple nominal schema labels without a normative contract;
-- verbose per-entry semantic categories that repeat record history.
+- verbose per-action semantic categories that repeat record history;
+- a recorder that interviews the model or attempts to infer action type;
+- free-form action-type parsing for end-turn detection;
+- parallel `router_cycles` history outside the chronological action stream;
+- blank or prospective router-cycle placeholders.
 
 ## Revision rule
 
