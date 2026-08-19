@@ -11,14 +11,14 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-bundle:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out repository!
+      - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Determine canonical identifiers
@@ -60,8 +60,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          ARCHIVE="execution-continuity-control_bundle_${COMMIT_SHA}.zip"
-
           python3 - <<'PY'
           import os
           import zipfile
@@ -69,7 +67,9 @@ jobs:
 
           root = Path("execution-continuity-control")
           commit = os.environ["COMMIT_SHA"]
-          output = Path(f"execution-continuity-control_bundle_{commit}.zip")
+          output = Path(
+              f"execution-continuity-control_bundle_{commit}.zip"
+          )
 
           files = sorted(
               p for p in root.rglob("*")
@@ -97,21 +97,6 @@ jobs:
           print(output)
           PY
 
-          sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
+          ARCHIVE="execution-continuity-control_bundle_${COMMIT_SHA}.zip"
 
-          echo "Bundle:"
-          ls -lh "$ARCHIVE" "${ARCHIVE}.sha256"
-
-          echo "Bundle SHA-256:"
-          cat "${ARCHIVE}.sha256"
-
-      - name: Upload canonical bundle artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: execution-continuity-control-${{ steps.ids.outputs.skill_tree_sha }}
-          path: |
-            execution-continuity-control_bundle_${{ steps.ids.outputs.commit_sha }}.zip
-            execution-continuity-control_bundle_${{ steps.ids.outputs.commit_sha }}.zip.sha256
-          if-no-files-found: error
-          retention-days: 90
-          compression-level: 0
+          sha256sum "$ARCHIVE" >
