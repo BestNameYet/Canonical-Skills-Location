@@ -4,7 +4,7 @@
 This source is combined at build time with the recorder, action questioner, and
 end-turn router into one generated ``bundle.py``. The generated bundle invokes
 those procedures through ordinary in-process Python function calls. There is no
-runtime source decoding, compression, ``exec()``, or ``compile()``.
+runtime source decoding, compression, or dynamic source evaluation.
 
 The generated bundle is the sole Orchestrator. The model acts only under the
 current bundle-issued payload. Every emitted control payload carries the
@@ -430,9 +430,7 @@ def cmd_continuity_answer(args: argparse.Namespace) -> int:
                     state_path,
                     state,
                     "FINAL_RESPONSE",
-                    (
-                        "Construct and deliver the final response from the supplied terminal context. Do not perform additional remediation or task execution."
-                    ),
+                    "Construct and deliver the final response from the supplied terminal context. Do not perform additional remediation or task execution.",
                     terminal_context(state, result),
                 )
                 return emit(payload)
