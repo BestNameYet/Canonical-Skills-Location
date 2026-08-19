@@ -64,15 +64,9 @@ The original recorder combined persistence with an action interview. This obscur
 
 The recorder was made deliberately ignorant of why it was invoked. On external `invoke`, it appends only a timestamped `recorder_invocation` action and starts `action_questioner.py`. Child-script callbacks use a separate append path that never starts another questionnaire, preventing recursive audit machinery.
 
-The action questioner owns the eight-question interview. Its binary discriminator is:
+The action questioner owns the post-action interrogation. End-turn detection is an explicit binary question rather than a semantic inference from free-form text.
 
-`AQ2: Is this action an end-of-turn attempt? Answer YES or NO.`
-
-`Y/N` are accepted aliases but storage is normalized to `YES/NO`. This replaced free-form action-type interpretation so routing is mechanical rather than semantic guesswork.
-
-After all eight answers, the questioner returns one formatted `action_questionnaire` object to the recorder. AQ2 `NO` ends the questioner cycle. AQ2 `YES` invokes the end-turn router.
-
-### Router return-path ownership
+### Router return-path ownership and dual output
 
 An intermediate design allowed `end_turn_router.py` to call the recorder directly. That violated the caller hierarchy: the end-turn router had been invoked by the action questioner, so its completed result should return to that caller rather than reaching sideways into persistence.
 
@@ -80,13 +74,39 @@ The corrected flow is:
 
 `recorder invoke → questioner → router → questioner → recorder`
 
-The action questioner remains the router's caller for the entire router cycle. Router answers are supplied through the questioner, which forwards them to the router. When the router reaches a directive, it returns a formatted `router_cycle` data object to the questioner and performs no record write.
-
-The questioner wraps the returned object as `end_turn_result` and sends that wrapper to the recorder. The recorder remains the sole execution-record writer. The router remains solely responsible for traversal and directive classification.
+The action questioner remains the router's caller for the entire router cycle. When the router reaches a directive, it produces both a model-facing control result (`CONTINUE`, `COMPLETE`, or `IMPASSE`) and a formatted `router_cycle` audit object. The questioner wraps the audit object as `end_turn_result` for the recorder and relays the control result toward the model. Neither product substitutes for the other.
 
 The execution record therefore has one chronological `actions` stream with three top-level variants: `recorder_invocation`, `action_questionnaire`, and `end_turn_result`. The `end_turn_result` contains the router-produced `router_cycle` object nested unchanged. There is no separate router history and no blank router placeholder.
 
-**Retained invariants:** every material action triggers prospective recording; recorder invocation does not infer action type; exact action-question and router Q/A evidence is preserved; end-turn detection is deterministic; router traversal remains executable and authoritative; results return through the caller chain; only the recorder mutates persistent record state.
+### Decision-engineering questionnaire replaces generic eight-question interview
+
+The original eight generic free-form questions preserved broad descriptions such as what happened, why, status, and evidence, but they were poorly normalized for future decision modeling. They also encouraged narrative answers where a finite decision vocabulary was available.
+
+The questionnaire was replaced with a structured post-action decision record. It now captures:
+
+- explicit end-turn classification;
+- concise user intent;
+- numbered independently testable user-intent items (`UI#`);
+- ordered atomic action units (`A#`);
+- whether a prior plan existed and, when it did, numbered plan items (`P#`);
+- action-to-intent mappings;
+- numbered evidence objects (`E#`);
+- per-intent outcomes and remaining gaps;
+- plan/path divergence and causes;
+- material decision-point bases;
+- overall activity outcome;
+- supported decision-boundary counterfactuals; and
+- a final constrained narrative mapping note.
+
+The atomic action vocabulary is intentionally finite even for meta-level work. Seven parent types (`ACQUIRE`, `TRANSFORM`, `EVALUATE`, `DECIDE`, `ACT`, `OBSERVE`, `COMMUNICATE`) have canonical subtypes. This is representational decomposition after an activity, not a mandate to interrupt execution after every tiny operation. The earlier problem with mandatory atomic bookkeeping is therefore not reintroduced.
+
+Every enumerated question co-presents a canonical definition table so classifications are selected against stable meanings rather than inferred from enum names alone. Free-form text is retained only where semantics cannot be usefully reduced to an enum, especially intent text, action targets, evidence references, short exception notes, and the final narrative mapping.
+
+The final `NARRATIVE_MAPPING` note is required because normalized graph-like fields alone do not preserve how the model understood the whole activity as a coherent sequence. The note must reference the already-created `UI#`, `A#`, `P#`, and `E#` identifiers and cannot introduce new actions, requirements, plans, or outcomes. It is treated as a constrained post-action self-report, not raw chain-of-thought and not independent evidence.
+
+The questioner is intentionally non-evaluative. It validates answer shape, canonical enum membership, identifier ordering, and internal references; it does not decide whether the model's answers are true. At completion it emits `QUESTIONER_ACTION_OVER` with the formatted questionnaire object. That signal means only that the interrogation action is complete.
+
+**Retained invariants:** exact Q/A evidence remains first-class; end-turn detection remains mechanical; recorder remains sole persistent snapshot writer; questioner does not infer hidden reasons; structured decision data is cross-checkable against observable execution evidence; representational decomposition must not become an execution gate.
 
 ## Protected invariants
 
@@ -99,29 +119,35 @@ The execution record therefore has one chronological `actions` stream with three
 7. Every immutable successor preserves all predecessor actions unchanged and appends exactly one new action.
 8. The recorder is the sole execution-record snapshot writer.
 9. Recorder invocation does not classify or infer the action; it timestamps invocation and starts the questioner.
-10. The action questioner owns exactly eight canonical questions and stores exact ordered Q/A pairs.
-11. AQ2 is the sole end-turn discriminator and is normalized to explicit `YES` or `NO`.
-12. AQ2 `YES` mechanically invokes the end-turn router only after the questionnaire object has been recorded.
-13. The action questioner remains the caller/proxy for the entire router cycle.
-14. The end-turn router never invokes the recorder and has no execution-record write authority.
-15. The executed router owns traversal and `CONTINUE`/`COMPLETE`/`IMPASSE` classification.
-16. A completed router cycle returns its formatted data object to the action questioner.
-17. The questioner wraps the returned router object as `end_turn_result` and returns that wrapper to the recorder.
-18. Child-script data-object appends do not recursively launch the action questioner.
-19. Worker terminal states end only the Worker lifecycle; only outer Orchestrator `COMPLETE` ends the user-facing turn.
-20. The Orchestrator remains task-domain neutral and is itself continuity-governed.
-21. Resolve one Git commit snapshot per governed turn and read all required canonical files from it.
-22. Canonical files use one stable path each; Git provides version history.
-23. Runtime Runnables are fresh derivatives with no canonical authority.
-24. Persistent record semantics are storage-provider neutral.
-25. Persistent record structure is controlled by the canonical JSON Schema plus recorder cross-snapshot invariants.
-26. Historical information is not redundantly restated in every new action object.
+10. The action questioner preserves exact ordered canonical Q/A pairs, including native structured JSON answers where required.
+11. `AQ1` is the sole action-questionnaire end-turn discriminator and is normalized to explicit `YES` or `NO`.
+12. Every enumerated action-questionnaire question co-presents its canonical definition table.
+13. Atomic action decomposition is post-action representation only; it must not force artificial execution segmentation or become a prerequisite that delays substantive work.
+14. Structured identifiers (`UI#`, `A#`, `P#`, `E#`) are ordered and cross-referenced rather than replaced by prose-only descriptions.
+15. The final `NARRATIVE_MAPPING` note may explain existing structured data but may not introduce new actions, requirements, plans, outcomes, or identifiers.
+16. The questioner validates form and reference consistency, not truth, hidden reasoning, or correctness of the model's self-report.
+17. `QUESTIONER_ACTION_OVER` means only that the questionnaire action is complete; it grants no Worker, router, or turn-completion authority.
+18. An end-turn-classified questionnaire invokes the end-turn router only after the questionnaire object has been recorded.
+19. The action questioner remains the caller/proxy for the entire router cycle.
+20. The end-turn router never invokes the recorder and has no execution-record write authority.
+21. The executed router owns traversal and `CONTINUE`/`COMPLETE`/`IMPASSE` classification.
+22. A completed router cycle produces both a model-facing control result and a formatted audit data object.
+23. The questioner wraps the returned router object as `end_turn_result` and returns that wrapper to the recorder before the directive is acted upon.
+24. Child-script data-object appends do not recursively launch the action questioner.
+25. Worker terminal states end only the Worker lifecycle; only outer Orchestrator `COMPLETE` ends the user-facing turn.
+26. The Orchestrator remains task-domain neutral and is itself continuity-governed.
+27. Resolve one Git commit snapshot per governed turn and read all required canonical files from it.
+28. Canonical files use one stable path each; Git provides version history.
+29. Runtime Runnables are fresh derivatives with no canonical authority.
+30. Persistent record semantics are storage-provider neutral.
+31. Persistent record structure is controlled by the canonical JSON Schema plus recorder cross-snapshot invariants.
+32. Historical information is not redundantly restated in every new action object.
 
 ## Superseded mechanisms
 
 Do not restore these merely because older artifacts contain them:
 
-- mandatory action-category decomposition;
+- mandatory action-category decomposition as an execution gate;
 - universal history-first gating;
 - one history file per turn;
 - history-template initialization and fixed-count archive rotation;
@@ -132,12 +158,14 @@ Do not restore these merely because older artifacts contain them:
 - allowing the Worker to own actual `END_TURN`;
 - treating Worker `COMPLETE`/`IMPASSE` or outer `IMPASSE` as actual-turn completion;
 - multiple nominal schema labels without a normative contract;
-- verbose per-action semantic categories that repeat record history;
+- verbose generic per-action semantic categories that repeat record history;
+- the generic eight-question free-form action interview;
 - a recorder that interviews the model or attempts to infer action type;
 - free-form action-type parsing for end-turn detection;
 - parallel router-cycle history outside the chronological action stream;
 - blank or prospective router-cycle placeholders;
-- direct router-to-recorder persistence calls.
+- direct router-to-recorder persistence calls;
+- treating a post-action narrative self-report as raw chain-of-thought or independent evidence.
 
 ## Revision rule
 
