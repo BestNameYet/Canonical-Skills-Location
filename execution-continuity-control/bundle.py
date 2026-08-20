@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Single-file Execution Continuity Control runtime with pre-action control."""
+"""Single-file Execution Continuity Control runtime with discrete pre-action semantics."""
 from __future__ import annotations
 
 import hashlib
@@ -12,20 +12,27 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-CONTROL_VERSION = 5
-PAYLOAD_SCHEMA = "execution-continuity-payload-v5"
+CONTROL_VERSION = 6
+PAYLOAD_SCHEMA = "execution-continuity-payload-v6"
 INITIALIZATION_SCHEMA = "execution-continuity-initialization-v1"
-SEMANTIC_PROTOCOL = "execution-semantic-engine-v1"
-PREPROCESSOR_PROTOCOL = "prompt-preprocessor-v2"
+SEMANTIC_PROTOCOL = "execution-semantic-engine-v2"
+PREPROCESSOR_PROTOCOL = "prompt-preprocessor-v3"
 RECORD_PREFIX = "execution-record_"
 RECORD_SUFFIX = ".json"
 STAMP_RE = re.compile(r"^execution-record_(\d{8}T\d{12}Z)\.json$")
 DIRECTIVES = {"CONTINUE", "COMPLETE", "IMPASSE"}
-
-BLOCK_THRESHOLD = 0.70
-ADVANCE_THRESHOLD = 0.55
-SUBSTITUTE_CONFIDENCE_THRESHOLD = 0.75
 MAX_PREACTION_RETRIES = 12
+
+ATTENTION_LEVELS = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
+INTENT_RELATIONSHIPS = {
+    "DIRECT_EXECUTION",
+    "NECESSARY_SUPPORT",
+    "OPTIONAL_SUPPORT",
+    "UNRELATED",
+    "CONFLICTS_WITH_INTENT",
+    "END_TURN_CANDIDATE",
+}
+SUBSTITUTE_RELATIONSHIPS = {"DIRECT_EXECUTION", "NECESSARY_SUPPORT", "NONE"}
 
 BEHAVIORAL_INSTRUCTIONS = [
     "The generated bundle is the sole Orchestrator. Act as the Worker only under the current payload.",
@@ -34,6 +41,7 @@ BEHAVIORAL_INSTRUCTIONS = [
     "TASK_ACTION authorizes exactly one material task action and only the command in that payload.",
     "No material action may begin from an ACTION_PROPOSAL request; ACTION_PROPOSAL authorizes only proposing the next action.",
     "Every proposed material action is evaluated before authorization against the current user-intent context, semantic attention, execution state, and the complete verbose failure-mode definitions.",
+    "Semantic evaluation supplies only Boolean or closed-enum decision inputs; it does not supply scores, probabilities, confidence values, or thresholds.",
     "A blocked action and its contextual semantic equivalents are unavailable until materially new user input, governing constraints, or observed state changes the decision context.",
     "After an authorized action completes, fails, or reaches a stop point, return the complete TASK_ACTION payload unchanged to this same bundle before any further material task action.",
     "FINAL_RESPONSE authorizes only construction and delivery of the final user-facing response.",
@@ -93,110 +101,9 @@ A proposed action instantiates this failure mode when planning, decomposition, l
 A proposed action instantiates this failure mode when it stops, refuses, defers, or materially redirects before the request has been carried as far as currently available information, authority, tools, and legitimate methods permit, and no concrete observable fact or governing constraint establishes that further progress is impossible or inappropriate. It is the residual class for refusal-to-execute behavior not captured more specifically elsewhere. A verified fact does not justify stopping under this definition when changing the execution path can avoid the condition while preserving the requested result.
 """.strip(),
     "BLOCKED_ACTION_EQUIVALENCE": """
-A proposed action instantiates this failure mode when its contextual semantic function, objective, target, prerequisite role, sequencing effect, or material consequence is equivalent to an action already blocked in the current decision context, even if its wording, tool name, decomposition, or surface procedure differs. This prevents lexical reformulation from bypassing a block. The match should fall when materially new user input, governing constraints, or observed state changes the decision context enough that the previously blocked semantic function is no longer the same action choice.
+A proposed action instantiates this failure mode when its contextual semantic function, objective, target, prerequisite role, sequencing effect, or material consequence is equivalent to an action already blocked in the current decision context, even if its wording, tool name, decomposition, or surface procedure differs. This prevents lexical reformulation from bypassing a block. The match should be false when materially new user input, governing constraints, or observed state changes the decision context enough that the previously blocked semantic function is no longer the same action choice.
 """.strip(),
 }
-
-# --- generic utilities ----------------------------------------------------
-
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-def iso_utc(dt: datetime | None = None) -> str:
-    return (dt or utc_now()).isoformat().replace("+00:00", "Z")
-
-def compact_stamp(dt: datetime | None = None) -> str:
-    return (dt or utc_now()).strftime("%Y%m%dT%H%M%S%fZ")
-
-def canonical_json(obj: Any) -> str:
-    return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-def sha256_json(obj: Any) -> str:
-    return hashlib.sha256(canonical_json(obj).encode()).hexdigest()
-
-def require_text(v: Any, name: str) -> str:
-    if not isinstance(v, str) or not v.strip():
-        raise ValueError(f"{name} must be non-empty text")
-    return v.strip()
-
-def require_probability(v: Any, name: str) -> float:
-    if isinstance(v, bool) or not isinstance(v, (int, float)):
-        raise ValueError(f"{name} must be a number from 0 to 1")
-    value = float(v)
-    if value < 0.0 or value > 1.0:
-        raise ValueError(f"{name} must be a number from 0 to 1")
-    return value
-
-def read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp.replace(path)
-
-# --- execution record -----------------------------------------------------
-
-def runtime_record_dir() -> Path:
-    configured = os.environ.get("EXECUTION_CONTINUITY_RECORD_DIR")
-    if configured:
-        return Path(configured)
-    base = Path("/mnt/data")
-    if base.exists() and os.access(base, os.W_OK):
-        return base
-    return Path.cwd()
-
-def list_records(directory: Path) -> list[tuple[datetime, Path]]:
-    if not directory.exists():
-        return []
-    found = []
-    for path in directory.iterdir():
-        if not path.is_file():
-            continue
-        match = STAMP_RE.fullmatch(path.name)
-        if not match:
-            continue
-        try:
-            timestamp = datetime.strptime(match.group(1), "%Y%m%dT%H%M%S%fZ").replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        found.append((timestamp, path))
-    return sorted(found, key=lambda item: item[0])
-
-def record_create(directory: Path) -> Path:
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{RECORD_PREFIX}{compact_stamp()}{RECORD_SUFFIX}"
-    while path.exists():
-        path = directory / f"{RECORD_PREFIX}{compact_stamp(utc_now() + timedelta(microseconds=1))}{RECORD_SUFFIX}"
-    write_json_atomic(path, {
-        "schema": "execution-continuity-record-v2",
-        "created_at": iso_utc(),
-        "updated_at": iso_utc(),
-        "last_sequence": 0,
-        "actions": [],
-    })
-    return path
-
-def record_latest(directory: Path) -> dict[str, Any]:
-    records = list_records(directory)
-    path = records[-1][1] if records else record_create(directory)
-    data = read_json(path)
-    return {"record": str(path), "record_name": path.name, "action_count": int(data.get("last_sequence", 0))}
-
-def record_append(record_state: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
-    path = Path(record_state["record"])
-    data = read_json(path)
-    sequence = int(data.get("last_sequence", 0)) + 1
-    item = {"sequence": sequence, "timestamp": iso_utc(), **action}
-    data.setdefault("actions", []).append(item)
-    data["last_sequence"] = sequence
-    data["updated_at"] = iso_utc()
-    write_json_atomic(path, data)
-    record_state["action_count"] = sequence
-    return item
-
-# --- semantic protocol ----------------------------------------------------
 
 SEMANTIC_KINDS = {
     "GOAL": "A terminal result or state requested by the user.",
@@ -235,27 +142,116 @@ FEATURES = {
     "COMPLETENESS": "All/every/complete/exhaustive semantics.",
     "DEGREE": "Strength or intensity expressed by the source.",
 }
-ATTENTION_LEVELS = {"CRITICAL": 8, "HIGH": 4, "MEDIUM": 2, "LOW": 1}
 
-def semantic_question(
-    question_id: str,
-    semantic_function: str,
-    instruction: str,
-    inputs: dict[str, Any],
-    response_schema: dict[str, Any],
-    constraints: list[str],
-    validator,
-    protocol: str = SEMANTIC_PROTOCOL,
-) -> Any:
-    prompt = {
-        "protocol": protocol,
-        "question_id": question_id,
-        "semantic_function": semantic_function,
-        "instruction": instruction,
-        "inputs": inputs,
-        "response_schema": response_schema,
-        "constraints": constraints,
-    }
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso_utc(dt: datetime | None = None) -> str:
+    return (dt or utc_now()).isoformat().replace("+00:00", "Z")
+
+
+def compact_stamp(dt: datetime | None = None) -> str:
+    return (dt or utc_now()).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def canonical_json(obj: Any) -> str:
+    return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def sha256_json(obj: Any) -> str:
+    return hashlib.sha256(canonical_json(obj).encode()).hexdigest()
+
+
+def require_text(v: Any, name: str) -> str:
+    if not isinstance(v, str) or not v.strip():
+        raise ValueError(f"{name} must be non-empty text")
+    return v.strip()
+
+
+def require_bool(v: Any, name: str) -> bool:
+    if not isinstance(v, bool):
+        raise ValueError(f"{name} must be JSON true or false")
+    return v
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(path)
+
+
+def runtime_record_dir() -> Path:
+    configured = os.environ.get("EXECUTION_CONTINUITY_RECORD_DIR")
+    if configured:
+        return Path(configured)
+    base = Path("/mnt/data")
+    if base.exists() and os.access(base, os.W_OK):
+        return base
+    return Path.cwd()
+
+
+def list_records(directory: Path) -> list[tuple[datetime, Path]]:
+    if not directory.exists():
+        return []
+    found = []
+    for path in directory.iterdir():
+        if not path.is_file():
+            continue
+        match = STAMP_RE.fullmatch(path.name)
+        if not match:
+            continue
+        try:
+            timestamp = datetime.strptime(match.group(1), "%Y%m%dT%H%M%S%fZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        found.append((timestamp, path))
+    return sorted(found, key=lambda item: item[0])
+
+
+def record_create(directory: Path) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{RECORD_PREFIX}{compact_stamp()}{RECORD_SUFFIX}"
+    while path.exists():
+        path = directory / f"{RECORD_PREFIX}{compact_stamp(utc_now() + timedelta(microseconds=1))}{RECORD_SUFFIX}"
+    write_json_atomic(path, {
+        "schema": "execution-continuity-record-v3",
+        "created_at": iso_utc(),
+        "updated_at": iso_utc(),
+        "last_sequence": 0,
+        "actions": [],
+    })
+    return path
+
+
+def record_latest(directory: Path) -> dict[str, Any]:
+    records = list_records(directory)
+    path = records[-1][1] if records else record_create(directory)
+    data = read_json(path)
+    return {"record": str(path), "record_name": path.name, "action_count": int(data.get("last_sequence", 0))}
+
+
+def record_append(record_state: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    path = Path(record_state["record"])
+    data = read_json(path)
+    sequence = int(data.get("last_sequence", 0)) + 1
+    item = {"sequence": sequence, "timestamp": iso_utc(), **action}
+    data.setdefault("actions", []).append(item)
+    data["last_sequence"] = sequence
+    data["updated_at"] = iso_utc()
+    write_json_atomic(path, data)
+    record_state["action_count"] = sequence
+    return item
+
+
+def semantic_question(question_id: str, semantic_function: str, instruction: str, inputs: dict[str, Any], response_schema: dict[str, Any], constraints: list[str], validator, protocol: str = SEMANTIC_PROTOCOL) -> Any:
+    prompt = {"protocol": protocol, "question_id": question_id, "semantic_function": semantic_function, "instruction": instruction, "inputs": inputs, "response_schema": response_schema, "constraints": constraints}
     while True:
         print(json.dumps(prompt, ensure_ascii=False), flush=True)
         line = sys.stdin.readline()
@@ -271,6 +267,7 @@ def semantic_question(
             return value
         except Exception as exc:
             prompt = {**prompt, "validation_error": str(exc)}
+
 
 def _validate_context_map(value: Any, name: str) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {"semantic_items", "relations", "ambiguities"}:
@@ -312,9 +309,8 @@ def _validate_context_map(value: Any, name: str) -> dict[str, Any]:
             raise ValueError(f"{name}.ambiguity interpretations invalid")
     return value
 
+
 def context_map(text: str, question_id: str, semantic_function: str) -> dict[str, Any]:
-    def validate(value: Any) -> None:
-        _validate_context_map(value, question_id)
     return semantic_question(
         question_id,
         semantic_function,
@@ -325,19 +321,14 @@ def context_map(text: str, question_id: str, semantic_function: str) -> dict[str
             "relations": [{"id": "R#", "kind": "RELATION_KIND", "from_id": "S#", "to_id": "S#", "meaning": "string"}],
             "ambiguities": [{"id": "U#", "subject": "string", "interpretations": ["string", "string"], "material": False}],
         },
-        [
-            "Semantic kinds: " + " | ".join(f"{k} — {v}" for k, v in SEMANTIC_KINDS.items()),
-            "Relation kinds: " + " | ".join(f"{k} — {v}" for k, v in RELATION_KINDS.items()),
-            "Feature names: " + " | ".join(f"{k} — {v}" for k, v in FEATURES.items()),
-            "Do not execute the user task.",
-        ],
-        validate,
+        ["Semantic kinds: " + " | ".join(f"{k} — {v}" for k, v in SEMANTIC_KINDS.items()), "Relation kinds: " + " | ".join(f"{k} — {v}" for k, v in RELATION_KINDS.items()), "Feature names: " + " | ".join(f"{k} — {v}" for k, v in FEATURES.items()), "Do not execute the user task."],
+        lambda value: _validate_context_map(value, question_id),
     )
+
 
 def intent_attention_map(task_prompt: str, intent_map: dict[str, Any]) -> dict[str, Any]:
     item_ids = {item["id"] for item in intent_map["semantic_items"]}
     relation_ids = {item["id"] for item in intent_map["relations"]}
-
     def validate(value: Any) -> None:
         if not isinstance(value, dict) or set(value) != {"item_attention", "relation_attention"}:
             raise ValueError("attention map invalid")
@@ -345,112 +336,80 @@ def intent_attention_map(task_prompt: str, intent_map: dict[str, Any]) -> dict[s
         if not isinstance(items, list) or {x.get("semantic_item_id") for x in items if isinstance(x, dict)} != item_ids:
             raise ValueError("item_attention must cover every semantic item")
         for item in items:
-            if set(item) != {"semantic_item_id", "attention", "execution_significance", "reason"}:
+            if set(item) != {"semantic_item_id", "attention", "reason"} or item["attention"] not in ATTENTION_LEVELS:
                 raise ValueError("item_attention entry invalid")
-            if item["attention"] not in ATTENTION_LEVELS:
-                raise ValueError("attention invalid")
-            require_probability(item["execution_significance"], "execution_significance")
             require_text(item["reason"], "attention reason")
         relations = value["relation_attention"]
         if not isinstance(relations, list) or {x.get("relation_id") for x in relations if isinstance(x, dict)} != relation_ids:
             raise ValueError("relation_attention must cover every relation")
         for item in relations:
-            if set(item) != {"relation_id", "attention", "execution_significance", "reason"}:
+            if set(item) != {"relation_id", "attention", "reason"} or item["attention"] not in ATTENTION_LEVELS:
                 raise ValueError("relation_attention entry invalid")
-            if item["attention"] not in ATTENTION_LEVELS:
-                raise ValueError("attention invalid")
-            require_probability(item["execution_significance"], "execution_significance")
             require_text(item["reason"], "attention reason")
-
     return semantic_question(
         "PA2",
         "MAP_USER_INTENT_ATTENTION",
-        "Assign contextual execution attention to every user-intent semantic item and relation. Attention measures how strongly preserving or advancing that item controls faithful execution. Explicit requested end states, explicit prohibitions, exclusions, ordering constraints, scope boundaries, and direct control directives normally receive high attention. Do not invent new requirements.",
+        "Assign one closed attention category to every user-intent semantic item and relation. Attention identifies semantic salience and fragility; it is not a score. Explicit requested end states, prohibitions, exclusions, ordering constraints, scope boundaries, and direct control directives normally receive high attention. Do not invent new requirements.",
         {"task_prompt": task_prompt, "intent_context_map": intent_map},
-        {
-            "item_attention": [{"semantic_item_id": "S#", "attention": "CRITICAL | HIGH | MEDIUM | LOW", "execution_significance": 0.0, "reason": "string"}],
-            "relation_attention": [{"relation_id": "R#", "attention": "CRITICAL | HIGH | MEDIUM | LOW", "execution_significance": 0.0, "reason": "string"}],
-        },
-        [
-            "Attention weights are ordinal: CRITICAL=8, HIGH=4, MEDIUM=2, LOW=1.",
-            "Higher attention means the item or relationship exerts greater control over candidate-action valuation.",
-        ],
+        {"item_attention": [{"semantic_item_id": "S#", "attention": "CRITICAL | HIGH | MEDIUM | LOW", "reason": "string"}], "relation_attention": [{"relation_id": "R#", "attention": "CRITICAL | HIGH | MEDIUM | LOW", "reason": "string"}]},
+        ["Choose exactly one attention enum for each mapped item and relationship."],
         validate,
     )
 
-# --- optional source-preserving prompt preprocessor -----------------------
 
 def run_prompt_preprocessor(original_prompt: str) -> dict[str, Any]:
     source_map = context_map(original_prompt, "PP1", "MAP_SOURCE_CONTEXT")
     if any(item["material"] for item in source_map["ambiguities"]):
         return {"status": "FALLBACK", "reason": "MATERIAL_AMBIGUITY", "task_prompt": original_prompt}
-
-    def validate_edits(value: Any) -> None:
-        if not isinstance(value, dict) or set(value) != {"candidate_task_prompt", "semantic_equivalence", "added_requirements", "note"}:
+    def validate_edit(value: Any) -> None:
+        expected = {"candidate_task_prompt", "semantically_equivalent", "added_requirements", "note"}
+        if not isinstance(value, dict) or set(value) != expected:
             raise ValueError("PP2 response invalid")
         require_text(value["candidate_task_prompt"], "candidate_task_prompt")
-        require_probability(value["semantic_equivalence"], "semantic_equivalence")
+        require_bool(value["semantically_equivalent"], "semantically_equivalent")
         if not isinstance(value["added_requirements"], list):
             raise ValueError("added_requirements must be array")
         require_text(value["note"], "note")
-
     edited = semantic_question(
         "PP2",
         "SOURCE_RELATIVE_SEMANTIC_EDIT",
-        "Produce a minimally edited candidate task prompt from original_user_prompt. Preserve all mapped semantics. Do not add execution strategy, methods, quality criteria, deliverables, assumptions, constraints, scope, or requirements. If no edit is needed, return the original text exactly.",
+        "Produce a minimally edited candidate task prompt from original_user_prompt. Preserve all mapped semantics. Do not add execution strategy, methods, quality criteria, deliverables, assumptions, constraints, scope, or requirements. Return semantically_equivalent as JSON true or false, not a score. If no edit is needed, return the original text exactly.",
         {"original_user_prompt": original_prompt, "source_context_map": source_map},
-        {"candidate_task_prompt": "string", "semantic_equivalence": 0.0, "added_requirements": ["string"], "note": "string"},
-        ["Semantic equivalence must describe preservation of the full mapped meaning, not merely topical similarity."],
-        validate_edits,
+        {"candidate_task_prompt": "string", "semantically_equivalent": True, "added_requirements": ["string"], "note": "string"},
+        ["Semantic equivalence is a Boolean semantic judgment, not a degree or confidence value."],
+        validate_edit,
         protocol=PREPROCESSOR_PROTOCOL,
     )
+    if not edited["semantically_equivalent"] or edited["added_requirements"]:
+        return {"status": "FALLBACK", "reason": "SEMANTIC_EDIT_REJECTED", "task_prompt": original_prompt}
     candidate = edited["candidate_task_prompt"]
     candidate_map = context_map(candidate, "PP3", "REMAP_CANDIDATE_CONTEXT")
-
     def validate_audit(value: Any) -> None:
-        if not isinstance(value, dict) or set(value) != {"equivalence", "missing_meaning", "added_meaning", "changed_relationships"}:
+        expected = {"equivalent", "missing_meaning", "added_meaning", "changed_relationships"}
+        if not isinstance(value, dict) or set(value) != expected:
             raise ValueError("PP4 response invalid")
-        require_probability(value["equivalence"], "equivalence")
+        require_bool(value["equivalent"], "equivalent")
         for key in ("missing_meaning", "added_meaning", "changed_relationships"):
             if not isinstance(value[key], list):
                 raise ValueError(f"{key} must be array")
-
     audit = semantic_question(
         "PP4",
         "AUDIT_PROMPT_EQUIVALENCE",
-        "Compare source and candidate context maps for semantic equivalence. Any added requirement, omitted meaning, changed referent, scope, modality, polarity, ordering, condition, cardinality, exclusion, or relationship is a semantic difference.",
+        "Compare source and candidate context maps and answer equivalent using JSON true or false. Any added requirement, omitted meaning, changed referent, scope, modality, polarity, ordering, condition, cardinality, exclusion, or relationship makes equivalent false.",
         {"original_user_prompt": original_prompt, "source_context_map": source_map, "candidate_task_prompt": candidate, "candidate_context_map": candidate_map},
-        {"equivalence": 0.0, "missing_meaning": ["string"], "added_meaning": ["string"], "changed_relationships": ["string"]},
-        ["Do not reward execution strategy additions."],
+        {"equivalent": True, "missing_meaning": ["string"], "added_meaning": ["string"], "changed_relationships": ["string"]},
+        ["Do not return a score or confidence value."],
         validate_audit,
         protocol=PREPROCESSOR_PROTOCOL,
     )
-    if audit["equivalence"] < 0.98 or audit["missing_meaning"] or audit["added_meaning"] or audit["changed_relationships"]:
+    if not audit["equivalent"] or audit["missing_meaning"] or audit["added_meaning"] or audit["changed_relationships"]:
         return {"status": "FALLBACK", "reason": "SEMANTIC_AUDIT_FAILED", "task_prompt": original_prompt, "audit": audit}
     return {"status": "ACCEPTED", "reason": None, "task_prompt": candidate, "source_context_map": source_map, "candidate_context_map": candidate_map, "audit": audit}
 
-# --- pre-action control ---------------------------------------------------
 
 def ask_action_proposal(state: dict[str, Any], instruction: str, excluded: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     excluded = excluded or []
-    prompt = {
-        "protocol": "pre-action-control",
-        "type": "PROPOSE_ACTION",
-        "instruction": instruction,
-        "task_prompt": state["task_prompt"],
-        "execution_state": state.get("execution_summary", {}),
-        "excluded_blocked_actions": excluded,
-        "response_schema": {
-            "action": "one concrete next material action clause, or END_TURN",
-            "purpose": "concise contextual purpose",
-            "expected_effect": "concise expected material effect",
-        },
-        "constraints": [
-            "Do not perform the action yet.",
-            "Propose one action only.",
-            "If excluded_blocked_actions is non-empty, do not propose the same action or a contextual semantic equivalent.",
-        ],
-    }
+    prompt = {"protocol": "pre-action-control", "type": "PROPOSE_ACTION", "instruction": instruction, "task_prompt": state["task_prompt"], "execution_state": state.get("execution_summary", {}), "excluded_blocked_actions": excluded, "response_schema": {"action": "one concrete next material action clause, or END_TURN", "purpose": "concise contextual purpose", "expected_effect": "concise expected material effect"}, "constraints": ["Do not perform the action yet.", "Propose one action only.", "If excluded_blocked_actions is non-empty, do not propose the same action or a contextual semantic equivalent."]}
     while True:
         print(json.dumps(prompt, ensure_ascii=False), flush=True)
         line = sys.stdin.readline()
@@ -471,33 +430,18 @@ def ask_action_proposal(state: dict[str, Any], instruction: str, excluded: list[
         except Exception as exc:
             prompt = {**prompt, "validation_error": str(exc)}
 
+
 def _validate_failure_evaluation(value: Any) -> None:
-    expected = {
-        "intent_advance",
-        "failure_values",
-        "dominant_failure_mode",
-        "dominant_failure_value",
-        "semantic_basis",
-        "blocked_action_descriptor",
-        "substitute_action",
-        "substitute_confidence",
-    }
+    expected = {"intent_relationship", "failure_matches", "semantic_basis", "blocked_action_descriptor", "substitute_action", "substitute_relationship"}
     if not isinstance(value, dict) or set(value) != expected:
         raise ValueError(f"evaluation must contain exactly {sorted(expected)}")
-    require_probability(value["intent_advance"], "intent_advance")
-    failure_values = value["failure_values"]
-    if not isinstance(failure_values, dict) or set(failure_values) != set(FAILURE_MODE_DEFINITIONS):
-        raise ValueError("failure_values must contain exactly every supplied failure mode")
-    for mode, score in failure_values.items():
-        require_probability(score, f"failure_values.{mode}")
-    if value["dominant_failure_mode"] not in FAILURE_MODE_DEFINITIONS:
-        raise ValueError("dominant_failure_mode invalid")
-    dominant = require_probability(value["dominant_failure_value"], "dominant_failure_value")
-    calculated = max(float(x) for x in failure_values.values())
-    if abs(dominant - calculated) > 1e-9:
-        raise ValueError("dominant_failure_value must equal max(failure_values)")
-    if float(failure_values[value["dominant_failure_mode"]]) != calculated:
-        raise ValueError("dominant_failure_mode must identify a maximum-valued failure mode")
+    if value["intent_relationship"] not in INTENT_RELATIONSHIPS:
+        raise ValueError("intent_relationship invalid")
+    matches = value["failure_matches"]
+    if not isinstance(matches, dict) or set(matches) != set(FAILURE_MODE_DEFINITIONS):
+        raise ValueError("failure_matches must contain exactly every supplied failure mode")
+    for mode, matched in matches.items():
+        require_bool(matched, f"failure_matches.{mode}")
     basis = value["semantic_basis"]
     if not isinstance(basis, dict) or set(basis) != {"intent_units", "action_units", "relationships", "attention_effect", "explanation"}:
         raise ValueError("semantic_basis invalid")
@@ -514,75 +458,39 @@ def _validate_failure_evaluation(value: Any) -> None:
     substitute = value["substitute_action"]
     if substitute is not None:
         require_text(substitute, "substitute_action")
-    require_probability(value["substitute_confidence"], "substitute_confidence")
+    if value["substitute_relationship"] not in SUBSTITUTE_RELATIONSHIPS:
+        raise ValueError("substitute_relationship invalid")
+    if substitute is None and value["substitute_relationship"] != "NONE":
+        raise ValueError("substitute_relationship must be NONE when substitute_action is null")
+    if substitute is not None and value["substitute_relationship"] == "NONE":
+        raise ValueError("substitute_relationship cannot be NONE when substitute_action is present")
+
 
 def evaluate_proposed_action(state: dict[str, Any], proposal: dict[str, Any], origin: str) -> dict[str, Any]:
-    inputs = {
-        "task_prompt": state["task_prompt"],
-        "user_intent_context_map": state["intent_context_map"],
-        "user_intent_attention_map": state["intent_attention_map"],
-        "current_execution_state": state.get("execution_summary", {}),
-        "proposed_action": proposal,
-        "proposal_origin": origin,
-        "blocked_actions": state.get("blocked_actions", []),
-        "failure_mode_definitions": FAILURE_MODE_DEFINITIONS,
-    }
     return semantic_question(
         f"PAE-{uuid.uuid4().hex[:8]}",
-        "COMPARE_ACTION_CONTEXT_TO_USER_INTENT_AND_VALUE_FAILURE_MODES",
-        "Contextually decompose the proposed action, compare its purpose, prerequisites, sequencing effect, target, material consequence, and stopping or detour function against the supplied user-intent context and attention maps, then independently value how strongly the action instantiates EACH supplied verbose failure-mode definition or a contextual semantic equivalent. Scores are semantic fit values from 0.0 (not instantiated) to 1.0 (fully instantiated). Calculate direct intent advancement separately. The failure definitions are reference classes, not lexical templates. Use the supplied blocked-action descriptors when valuing BLOCKED_ACTION_EQUIVALENCE. If a nearest materially direct prompt-supported substitute is apparent, return it; otherwise return null.",
-        inputs,
-        {
-            "intent_advance": 0.0,
-            "failure_values": {mode: 0.0 for mode in FAILURE_MODE_DEFINITIONS},
-            "dominant_failure_mode": "FAILURE_MODE_ID",
-            "dominant_failure_value": 0.0,
-            "semantic_basis": {
-                "intent_units": ["string"],
-                "action_units": ["string"],
-                "relationships": ["string"],
-                "attention_effect": "string",
-                "explanation": "string",
-            },
-            "blocked_action_descriptor": {
-                "objective": "string",
-                "target": "string",
-                "operation": "string",
-                "contextual_function": "string",
-                "material_effect": "string",
-            },
-            "substitute_action": None,
-            "substitute_confidence": 0.0,
-        },
-        [
-            "Every failure mode definition above is supplied in full on every evaluation and must be evaluated independently.",
-            "Use contextual semantic equivalence, not word overlap.",
-            "High-attention user-intent items and relationships exert greater weight on conflict, delay, and advancement judgments.",
-            "Do not perform the action.",
-            "Do not convert prudence, preference, or an execution strategy into a user requirement.",
-        ],
+        "CLASSIFY_ACTION_CONTEXT_AND_FAILURE_MODES",
+        "Contextually decompose the proposed action and classify it using only the supplied Boolean and enumerated decision parameters. For EACH verbose failure-mode definition, answer whether the proposed action instantiates that mode or a contextual semantic equivalent: true means YES, false means NO. Also select exactly one intent_relationship enum. Do not score, rank, weight, estimate confidence, or return probabilities. Use blocked_action descriptors when classifying BLOCKED_ACTION_EQUIVALENCE. If a nearest materially direct prompt-supported substitute is apparent, return it and classify its relationship; otherwise return null and NONE.",
+        {"task_prompt": state["task_prompt"], "user_intent_context_map": state["intent_context_map"], "user_intent_attention_map": state["intent_attention_map"], "current_execution_state": state.get("execution_summary", {}), "proposed_action": proposal, "proposal_origin": origin, "blocked_actions": state.get("blocked_actions", []), "failure_mode_definitions": FAILURE_MODE_DEFINITIONS},
+        {"intent_relationship": "DIRECT_EXECUTION | NECESSARY_SUPPORT | OPTIONAL_SUPPORT | UNRELATED | CONFLICTS_WITH_INTENT | END_TURN_CANDIDATE", "failure_matches": {mode: False for mode in FAILURE_MODE_DEFINITIONS}, "semantic_basis": {"intent_units": ["string"], "action_units": ["string"], "relationships": ["string"], "attention_effect": "string", "explanation": "string"}, "blocked_action_descriptor": {"objective": "string", "target": "string", "operation": "string", "contextual_function": "string", "material_effect": "string"}, "substitute_action": None, "substitute_relationship": "DIRECT_EXECUTION | NECESSARY_SUPPORT | NONE"},
+        ["Every failure mode definition is supplied in full and must receive exactly one Boolean answer.", "Evaluate semantic function and contextual effect, not lexical overlap.", "Attention categories identify which intent features dominate the classification; do not convert them to numbers.", "A matched failure mode is a categorical fact for the deterministic engine, not a degree of similarity.", "Do not perform the action.", "Do not convert prudence, preference, or an execution strategy into a user requirement."],
         _validate_failure_evaluation,
     )
 
+
 def deterministic_action_decision(evaluation: dict[str, Any]) -> dict[str, Any]:
-    dominant_value = float(evaluation["dominant_failure_value"])
-    intent_advance = float(evaluation["intent_advance"])
-    substitute = evaluation.get("substitute_action")
-    substitute_confidence = float(evaluation.get("substitute_confidence", 0.0))
-    if dominant_value >= BLOCK_THRESHOLD:
-        if substitute and substitute_confidence >= SUBSTITUTE_CONFIDENCE_THRESHOLD:
-            return {
-                "decision": "EVALUATE_SUBSTITUTE",
-                "action": substitute,
-                "reason": evaluation["dominant_failure_mode"],
-            }
-        return {
-            "decision": "MODEL_SELECT_EXCLUDING_BLOCKED",
-            "reason": evaluation["dominant_failure_mode"],
-        }
-    if intent_advance >= ADVANCE_THRESHOLD:
-        return {"decision": "CONTINUE_CANDIDATE"}
-    return {"decision": "MODEL_SELECT_EXCLUDING_BLOCKED", "reason": "INSUFFICIENT_INTENT_ADVANCEMENT"}
+    matched = [mode for mode, value in evaluation["failure_matches"].items() if value]
+    if matched:
+        substitute = evaluation.get("substitute_action")
+        substitute_relationship = evaluation.get("substitute_relationship")
+        if substitute and substitute_relationship in {"DIRECT_EXECUTION", "NECESSARY_SUPPORT"}:
+            return {"decision": "EVALUATE_SUBSTITUTE", "action": substitute, "reason": matched[0], "matched_failure_modes": matched}
+        return {"decision": "MODEL_SELECT_EXCLUDING_BLOCKED", "reason": matched[0], "matched_failure_modes": matched}
+    relationship = evaluation["intent_relationship"]
+    if relationship in {"DIRECT_EXECUTION", "NECESSARY_SUPPORT", "END_TURN_CANDIDATE"}:
+        return {"decision": "CONTINUE_CANDIDATE", "matched_failure_modes": []}
+    return {"decision": "MODEL_SELECT_EXCLUDING_BLOCKED", "reason": f"INTENT_RELATIONSHIP_{relationship}", "matched_failure_modes": []}
+
 
 def pre_action_control(state: dict[str, Any], initial_instruction: str) -> dict[str, Any]:
     proposal = ask_action_proposal(state, initial_instruction, state.get("blocked_actions", []))
@@ -590,109 +498,63 @@ def pre_action_control(state: dict[str, Any], initial_instruction: str) -> dict[
     for _ in range(MAX_PREACTION_RETRIES):
         evaluation = evaluate_proposed_action(state, proposal, origin)
         decision = deterministic_action_decision(evaluation)
-        record_append(state["record_state"], {
-            "action_type": "pre_action_evaluation",
-            "scope": "worker",
-            "proposal": proposal,
-            "evaluation": evaluation,
-            "deterministic_decision": decision,
-        })
-
+        record_append(state["record_state"], {"action_type": "pre_action_evaluation", "scope": "worker", "proposal": proposal, "evaluation": evaluation, "deterministic_decision": decision})
         if proposal["action"].strip().upper() == "END_TURN":
             if decision["decision"] == "CONTINUE_CANDIDATE":
                 return {"terminal_candidate": True, "proposal": proposal, "evaluation": evaluation}
             descriptor = evaluation["blocked_action_descriptor"]
-            state.setdefault("blocked_actions", []).append({
-                **descriptor,
-                "blocked_reason": decision.get("reason"),
-                "blocked_at_sequence": state["record_state"]["action_count"],
-            })
-            proposal = ask_action_proposal(
-                state,
-                "The end-turn action was blocked. Select the next useful material action toward task_prompt, excluding the blocked action and contextual semantic equivalents.",
-                state["blocked_actions"],
-            )
+            state.setdefault("blocked_actions", []).append({**descriptor, "blocked_reason": decision.get("reason"), "matched_failure_modes": decision.get("matched_failure_modes", []), "blocked_at_sequence": state["record_state"]["action_count"]})
+            proposal = ask_action_proposal(state, "The end-turn action was blocked. Select the next useful material action toward task_prompt, excluding the blocked action and contextual semantic equivalents.", state["blocked_actions"])
             origin = "MODEL_RESELECT"
             continue
-
         if decision["decision"] == "CONTINUE_CANDIDATE":
             return {"terminal_candidate": False, "proposal": proposal, "evaluation": evaluation}
-
         descriptor = evaluation["blocked_action_descriptor"]
-        state.setdefault("blocked_actions", []).append({
-            **descriptor,
-            "blocked_reason": decision.get("reason"),
-            "blocked_at_sequence": state["record_state"]["action_count"],
-        })
-
+        state.setdefault("blocked_actions", []).append({**descriptor, "blocked_reason": decision.get("reason"), "matched_failure_modes": decision.get("matched_failure_modes", []), "blocked_at_sequence": state["record_state"]["action_count"]})
         if decision["decision"] == "EVALUATE_SUBSTITUTE":
-            proposal = {
-                "action": decision["action"],
-                "purpose": "Semantic evaluator supplied nearest prompt-supported substitute.",
-                "expected_effect": "Advance the user intent while avoiding the blocked failure-mode behavior.",
-            }
+            proposal = {"action": decision["action"], "purpose": "Semantic evaluator supplied the nearest prompt-supported substitute.", "expected_effect": "Advance the user intent while avoiding the blocked failure-mode behavior."}
             origin = "SEMANTIC_ENGINE_SUBSTITUTE"
             continue
-
-        proposal = ask_action_proposal(
-            state,
-            "Select a different next material action toward task_prompt. The prior candidate is blocked; exclude it and all contextual semantic equivalents represented in excluded_blocked_actions.",
-            state["blocked_actions"],
-        )
+        proposal = ask_action_proposal(state, "Select a different next material action toward task_prompt. The prior candidate is blocked; exclude it and all contextual semantic equivalents represented in excluded_blocked_actions.", state["blocked_actions"])
         origin = "MODEL_RESELECT"
     raise RuntimeError("pre-action control exceeded maximum candidate retries")
 
-# --- end-turn completion control -----------------------------------------
 
 def run_terminal_check(state: dict[str, Any]) -> dict[str, Any]:
+    completion_states = {"COMPLETE", "INCOMPLETE"}
+    impasse_states = {"ESTABLISHED", "NOT_ESTABLISHED"}
     def validate(value: Any) -> None:
-        expected = {"directive", "completion_value", "impasse_value", "remaining_gaps", "observable_basis"}
+        expected = {"directive", "completion_state", "impasse_state", "remaining_gaps", "observable_basis"}
         if not isinstance(value, dict) or set(value) != expected:
             raise ValueError("terminal check response invalid")
-        if value["directive"] not in DIRECTIVES:
-            raise ValueError("terminal directive invalid")
-        require_probability(value["completion_value"], "completion_value")
-        require_probability(value["impasse_value"], "impasse_value")
+        if value["directive"] not in DIRECTIVES or value["completion_state"] not in completion_states or value["impasse_state"] not in impasse_states:
+            raise ValueError("terminal categorical response invalid")
         if not isinstance(value["remaining_gaps"], list):
             raise ValueError("remaining_gaps must be array")
         require_text(value["observable_basis"], "observable_basis")
-
     result = semantic_question(
         "TERMINAL",
         "TERMINAL_COMPLETION_OR_IMPASSE_CHECK",
-        "Determine whether the requested work is complete or a genuine impasse remains after pre-action control has already filtered refusal, deferral, and detour behavior. COMPLETE requires the requested result to be actually deliverable with observable support where applicable and no material requested gap remaining. IMPASSE requires an observable, grounded condition that prevents legitimate further progress through available paths. Otherwise return CONTINUE.",
-        {
-            "task_prompt": state["task_prompt"],
-            "user_intent_context_map": state["intent_context_map"],
-            "user_intent_attention_map": state["intent_attention_map"],
-            "execution_state": state.get("execution_summary", {}),
-            "blocked_actions": state.get("blocked_actions", []),
-        },
-        {
-            "directive": "CONTINUE | COMPLETE | IMPASSE",
-            "completion_value": 0.0,
-            "impasse_value": 0.0,
-            "remaining_gaps": ["string"],
-            "observable_basis": "string",
-        },
-        [
-            "Do not use a previously blocked failure-mode behavior as evidence of impasse.",
-            "A failed path alone is not a task impasse.",
-        ],
+        "Select closed categorical answers only. COMPLETE requires the requested result to be actually delivered or ready for final delivery with no material requested gap. IMPASSE requires an observable grounded condition preventing legitimate further progress through available paths. Otherwise select CONTINUE. Do not return scores or confidence values.",
+        {"task_prompt": state["task_prompt"], "user_intent_context_map": state["intent_context_map"], "user_intent_attention_map": state["intent_attention_map"], "execution_state": state.get("execution_summary", {}), "blocked_actions": state.get("blocked_actions", [])},
+        {"directive": "CONTINUE | COMPLETE | IMPASSE", "completion_state": "COMPLETE | INCOMPLETE", "impasse_state": "ESTABLISHED | NOT_ESTABLISHED", "remaining_gaps": ["string"], "observable_basis": "string"},
+        ["Do not use a previously blocked failure-mode behavior as evidence of impasse.", "A failed path alone is not a task impasse.", "The deterministic engine will reject internally inconsistent categorical combinations."],
         validate,
     )
-    if result["directive"] == "COMPLETE" and (result["completion_value"] < 0.85 or result["remaining_gaps"]):
+    if result["directive"] == "COMPLETE" and (result["completion_state"] != "COMPLETE" or result["remaining_gaps"]):
         result["directive"] = "CONTINUE"
-    if result["directive"] == "IMPASSE" and result["impasse_value"] < 0.85:
+    if result["directive"] == "IMPASSE" and result["impasse_state"] != "ESTABLISHED":
         result["directive"] = "CONTINUE"
+    if result["directive"] == "CONTINUE" and result["completion_state"] == "COMPLETE" and not result["remaining_gaps"]:
+        result["directive"] = "COMPLETE"
     return result
 
-# --- payload/state --------------------------------------------------------
 
 def seal_payload(payload: dict[str, Any]) -> dict[str, Any]:
     base = {key: value for key, value in payload.items() if key != "payload_sha256"}
     payload["payload_sha256"] = sha256_json(base)
     return payload
+
 
 def verify_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict) or payload.get("schema") != PAYLOAD_SCHEMA:
@@ -707,81 +569,26 @@ def verify_payload(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("state missing")
     return payload
 
+
 def new_state(user_prompt: str) -> dict[str, Any]:
     require_text(user_prompt, "initialization.user_prompt")
     record_state = record_latest(runtime_record_dir())
-    return {
-        "control_version": CONTROL_VERSION,
-        "sequence": 1,
-        "record_state": record_state,
-        "turn_start_action_count": record_state["action_count"],
-        "original_user_prompt": user_prompt,
-        "task_prompt": user_prompt,
-        "prompt_intake_mode": "VERBATIM",
-        "preprocessor_requested": False,
-        "preprocessor_status": "NOT_REQUESTED",
-        "intent_context_map": None,
-        "intent_attention_map": None,
-        "blocked_actions": [],
-        "execution_summary": {
-            "authorized_actions": [],
-            "observed_failures": [],
-            "verified_limitations": [],
-            "completed_results": [],
-        },
-    }
+    return {"control_version": CONTROL_VERSION, "sequence": 1, "record_state": record_state, "turn_start_action_count": record_state["action_count"], "original_user_prompt": user_prompt, "task_prompt": user_prompt, "prompt_intake_mode": "VERBATIM", "preprocessor_requested": False, "preprocessor_status": "NOT_REQUESTED", "intent_context_map": None, "intent_attention_map": None, "blocked_actions": [], "execution_summary": {"authorized_actions": [], "observed_failures": [], "verified_limitations": [], "completed_results": []}}
+
 
 def issue_task_payload(state: dict[str, Any], proposal: dict[str, Any], evaluation: dict[str, Any]) -> dict[str, Any]:
     command = require_text(proposal["action"], "proposal.action")
-    return seal_payload({
-        "schema": PAYLOAD_SCHEMA,
-        "authority": "TASK_ACTION",
-        "task_prompt": state["task_prompt"],
-        "command": command,
-        "context": {
-            "pre_action_decision": "CONTINUE_CANDIDATE",
-            "proposal": proposal,
-            "evaluation": evaluation,
-            "blocked_actions": state.get("blocked_actions", []),
-        },
-        "behavioral_instructions": BEHAVIORAL_INSTRUCTIONS,
-        "state": state,
-    })
+    return seal_payload({"schema": PAYLOAD_SCHEMA, "authority": "TASK_ACTION", "task_prompt": state["task_prompt"], "command": command, "context": {"pre_action_decision": "CONTINUE_CANDIDATE", "proposal": proposal, "evaluation": evaluation, "blocked_actions": state.get("blocked_actions", [])}, "behavioral_instructions": BEHAVIORAL_INSTRUCTIONS, "state": state})
+
 
 def issue_final_payload(state: dict[str, Any], terminal: dict[str, Any]) -> dict[str, Any]:
     record_path = Path(state["record_state"]["record"])
     record_content = read_json(record_path) if record_path.exists() else None
-    return seal_payload({
-        "schema": PAYLOAD_SCHEMA,
-        "authority": "FINAL_RESPONSE",
-        "task_prompt": state["task_prompt"],
-        "command": "Construct and deliver the final user-facing response satisfying task_prompt from the current conversation and terminal context. Do not perform additional substantive task work.",
-        "context": {
-            "terminal_result": terminal,
-            "execution_record_path": str(record_path),
-            "execution_record_filename": record_path.name,
-            "execution_record": record_content,
-            "current_turn_action_range": {
-                "start_sequence": state["turn_start_action_count"] + 1,
-                "end_sequence": state["record_state"]["action_count"],
-            },
-        },
-        "behavioral_instructions": BEHAVIORAL_INSTRUCTIONS,
-        "state": state,
-    })
+    return seal_payload({"schema": PAYLOAD_SCHEMA, "authority": "FINAL_RESPONSE", "task_prompt": state["task_prompt"], "command": "Construct and deliver the final user-facing response satisfying task_prompt from the current conversation and terminal context. Do not perform additional substantive task work.", "context": {"terminal_result": terminal, "execution_record_path": str(record_path), "execution_record_filename": record_path.name, "execution_record": record_content, "current_turn_action_range": {"start_sequence": state["turn_start_action_count"] + 1, "end_sequence": state["record_state"]["action_count"]}}, "behavioral_instructions": BEHAVIORAL_INSTRUCTIONS, "state": state})
+
 
 def ask_post_action_report(payload: dict[str, Any]) -> dict[str, Any]:
-    prompt = {
-        "protocol": "post-action-record",
-        "instruction": "Report only the observable result of the single authorized action just attempted. This is evidence recording, not a behavioral questionnaire and grants no authority for another action.",
-        "authorized_action": payload["command"],
-        "response_schema": {
-            "status": "COMPLETED | PARTIAL | FAILED",
-            "observable_evidence": ["string"],
-            "state_changes": ["string"],
-            "remaining_gap": "string or NONE",
-        },
-    }
+    prompt = {"protocol": "post-action-record", "instruction": "Report only the observable result of the single authorized action just attempted. This is evidence recording, not a behavioral questionnaire and grants no authority for another action.", "authorized_action": payload["command"], "response_schema": {"status": "COMPLETED | PARTIAL | FAILED", "observable_evidence": ["string"], "state_changes": ["string"], "remaining_gap": "string or NONE"}}
     while True:
         print(json.dumps(prompt, ensure_ascii=False), flush=True)
         line = sys.stdin.readline()
@@ -804,35 +611,20 @@ def ask_post_action_report(payload: dict[str, Any]) -> dict[str, Any]:
         except Exception as exc:
             prompt = {**prompt, "validation_error": str(exc)}
 
+
 def process_returned_payload(payload: dict[str, Any]) -> dict[str, Any]:
     payload = verify_payload(payload)
     if payload["authority"] != "TASK_ACTION":
         raise ValueError("only TASK_ACTION payloads may be returned to the bundle")
     state = payload["state"]
     report = ask_post_action_report(payload)
-    record_append(state["record_state"], {
-        "action_type": "authorized_action_result",
-        "scope": "worker",
-        "authorized_action": payload["command"],
-        "report": report,
-    })
-    state["execution_summary"]["authorized_actions"].append({
-        "action": payload["command"],
-        "status": report["status"],
-        "evidence": report["observable_evidence"],
-        "state_changes": report["state_changes"],
-        "remaining_gap": report["remaining_gap"],
-    })
+    record_append(state["record_state"], {"action_type": "authorized_action_result", "scope": "worker", "authorized_action": payload["command"], "report": report})
+    state["execution_summary"]["authorized_actions"].append({"action": payload["command"], "status": report["status"], "evidence": report["observable_evidence"], "state_changes": report["state_changes"], "remaining_gap": report["remaining_gap"]})
     if report["status"] == "FAILED":
-        state["execution_summary"]["observed_failures"].append({
-            "action": payload["command"],
-            "evidence": report["observable_evidence"],
-            "remaining_gap": report["remaining_gap"],
-        })
+        state["execution_summary"]["observed_failures"].append({"action": payload["command"], "evidence": report["observable_evidence"], "remaining_gap": report["remaining_gap"]})
     if report["status"] == "COMPLETED":
         state["execution_summary"]["completed_results"].extend(report["observable_evidence"] or report["state_changes"])
     state["sequence"] += 1
-
     control = pre_action_control(state, "Propose the single next material action toward task_prompt, or END_TURN only if no further material action is needed.")
     if control["terminal_candidate"]:
         terminal = run_terminal_check(state)
@@ -842,6 +634,7 @@ def process_returned_payload(payload: dict[str, Any]) -> dict[str, Any]:
         control = pre_action_control(state, "Terminal check returned CONTINUE. Propose the next useful material action toward task_prompt; do not end the turn yet.")
     return issue_task_payload(state, control["proposal"], control["evaluation"])
 
+
 def parse_initialization(value: Any) -> tuple[str, bool]:
     if not isinstance(value, dict):
         raise ValueError("initialization must be an object")
@@ -849,20 +642,18 @@ def parse_initialization(value: Any) -> tuple[str, bool]:
     allowed = required | {"preprocessor"}
     if not required.issubset(value) or not set(value).issubset(allowed):
         raise ValueError("initialization object must contain schema, type, and user_prompt, with only optional preprocessor")
-    if value.get("schema") != INITIALIZATION_SCHEMA:
-        raise ValueError("initialization schema is invalid")
-    if value.get("type") != "INITIALIZE":
-        raise ValueError("initialization type must be INITIALIZE")
+    if value.get("schema") != INITIALIZATION_SCHEMA or value.get("type") != "INITIALIZE":
+        raise ValueError("initialization schema or type invalid")
     requested = "preprocessor" in value
     if requested and value.get("preprocessor") is not True:
         raise ValueError("when present, initialization.preprocessor must be JSON true")
     return require_text(value["user_prompt"], "initialization.user_prompt"), requested
 
+
 def process_initialization(value: Any) -> dict[str, Any]:
     user_prompt, preprocessor_requested = parse_initialization(value)
     state = new_state(user_prompt)
     state["preprocessor_requested"] = preprocessor_requested
-
     if preprocessor_requested:
         try:
             result = run_prompt_preprocessor(user_prompt)
@@ -877,17 +668,9 @@ def process_initialization(value: Any) -> dict[str, Any]:
             state["preprocessor_status"] = "FALLBACK"
             state["preprocessor_reason"] = "PROTOCOL_ERROR"
             state["preprocessor_error"] = {"type": type(exc).__name__, "detail": str(exc)}
-
     state["intent_context_map"] = context_map(state["task_prompt"], "PA1", "MAP_USER_INTENT_CONTEXT")
     state["intent_attention_map"] = intent_attention_map(state["task_prompt"], state["intent_context_map"])
-    record_append(state["record_state"], {
-        "action_type": "turn_intent_map",
-        "scope": "worker",
-        "task_prompt": state["task_prompt"],
-        "intent_context_map": state["intent_context_map"],
-        "intent_attention_map": state["intent_attention_map"],
-    })
-
+    record_append(state["record_state"], {"action_type": "turn_intent_map", "scope": "worker", "task_prompt": state["task_prompt"], "intent_context_map": state["intent_context_map"], "intent_attention_map": state["intent_attention_map"]})
     control = pre_action_control(state, "Propose the single first material action toward task_prompt. Do not execute it yet.")
     if control["terminal_candidate"]:
         terminal = run_terminal_check(state)
@@ -897,20 +680,16 @@ def process_initialization(value: Any) -> dict[str, Any]:
         control = pre_action_control(state, "Terminal check returned CONTINUE. Propose the first useful material action toward task_prompt.")
     return issue_task_payload(state, control["proposal"], control["evaluation"])
 
+
 def emit(payload: dict[str, Any]) -> int:
     print(json.dumps(payload, ensure_ascii=False), flush=True)
     return 0
 
+
 def main() -> int:
     first = sys.stdin.readline()
     if first == "" or not first.strip():
-        print(json.dumps({
-            "schema": PAYLOAD_SCHEMA,
-            "authority": "NONE",
-            "execution_authority": False,
-            "error": "InitializationRequired",
-            "detail": f"Invoke with one JSON line using schema {INITIALIZATION_SCHEMA} and type INITIALIZE, or return a previously issued TASK_ACTION payload.",
-        }, ensure_ascii=False), flush=True)
+        print(json.dumps({"schema": PAYLOAD_SCHEMA, "authority": "NONE", "execution_authority": False, "error": "InitializationRequired", "detail": f"Invoke with one JSON line using schema {INITIALIZATION_SCHEMA} and type INITIALIZE, or return a previously issued TASK_ACTION payload."}, ensure_ascii=False), flush=True)
         return 2
     try:
         value = json.loads(first)
@@ -918,14 +697,9 @@ def main() -> int:
             return emit(process_initialization(value))
         return emit(process_returned_payload(value))
     except Exception as exc:
-        print(json.dumps({
-            "schema": PAYLOAD_SCHEMA,
-            "authority": "NONE",
-            "execution_authority": False,
-            "error": type(exc).__name__,
-            "detail": str(exc),
-        }, ensure_ascii=False), flush=True)
+        print(json.dumps({"schema": PAYLOAD_SCHEMA, "authority": "NONE", "execution_authority": False, "error": type(exc).__name__, "detail": str(exc)}, ensure_ascii=False), flush=True)
         return 2
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
